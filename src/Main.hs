@@ -1,14 +1,10 @@
--- {-# LANGUAGE LambdaCase #-}
--- {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE OverloadedStrings #-}
--- {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Main where
 
-import Debug.Trace
+-- import Debug.Trace
 
 import qualified Algorithms.NaturalSort as NaturalSort
 
@@ -23,6 +19,7 @@ import qualified Graphics.Vty as V
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Exception
+import Control.Lens
 
 import System.Environment
 import System.Process
@@ -37,6 +34,7 @@ import Data.List
 import Data.Bool
 import Data.Functor
 import qualified Data.Text as Text
+import qualified Data.Vector as Vector
 import qualified Data.ByteString as BS
 
 import qualified Options.Applicative as Opt
@@ -86,15 +84,19 @@ data DiffInfo = DiffInfo
   , diffRight :: FileType
   } deriving (Show)
 
+parentDiffInfo :: DiffInfo
+parentDiffInfo = DiffInfo ".." Matching Directory Directory
+
 fileType :: FileStatus -> FileType
-fileType (isRegularFile     -> True) = RegularFile
-fileType (isDirectory       -> True) = Directory
-fileType (isSymbolicLink    -> True) = Symlink
-fileType (isBlockDevice     -> True) = BlockDevice
-fileType (isCharacterDevice -> True) = CharDevice
-fileType (isNamedPipe       -> True) = NamedPipe
-fileType (isSocket          -> True) = Socket
-fileType _                           = BlockDevice
+fileType file
+  | isRegularFile file     = RegularFile
+  | isDirectory file       = Directory
+  | isSymbolicLink file    = Symlink
+  | isBlockDevice file     = BlockDevice
+  | isCharacterDevice file = CharDevice
+  | isNamedPipe file       = NamedPipe
+  | isSocket file          = Socket
+  | otherwise              = BlockDevice
 
 diffFolders :: FilePath -> FilePath -> IO [DiffInfo]
 diffFolders x y = sequence =<< diffFolders' x y
@@ -157,11 +159,11 @@ data AppState = AppState
   , stateBase1 :: FilePath
   , stateBase2 :: FilePath
   , stateCwd :: [String]
-  , stateDiff :: [DiffInfo]
-  , stateIndex :: Int
+  , stateDiff :: B.List String DiffInfo
   } deriving (Show)
 
-type App = B.App AppState () ()
+type Name = String
+type App = B.App AppState () Name
 
 app :: App
 app = B.App
@@ -172,56 +174,48 @@ app = B.App
   , B.appAttrMap      = appAttrMap
   }
 
-appChooseCursor :: AppState -> [B.CursorLocation n] -> Maybe (B.CursorLocation n)
+appChooseCursor :: AppState -> [B.CursorLocation Name] -> Maybe (B.CursorLocation Name)
 appChooseCursor s xs = Nothing
 
-appHandleEvent :: AppState -> B.BrickEvent n e -> B.EventM n (B.Next AppState)
-appHandleEvent s (B.VtyEvent (V.EvKey key mod)) = case (key, mod) of
+appHandleEvent :: AppState -> B.BrickEvent Name e -> B.EventM Name (B.Next AppState)
+appHandleEvent s event@(B.VtyEvent eventV@(V.EvKey key mod)) = case (key, mod) of
   (V.KChar 'q', []) -> B.halt s
   (V.KEsc, []) -> B.halt s
-  (V.KUp, []) -> B.continue
-    s{stateIndex=max 0 (stateIndex s - 1)}
-  (V.KDown, []) -> B.continue
-    s{stateIndex=min (length (stateDiff s)) (stateIndex s + 1)}
-  (V.KHome, []) -> B.continue
-    s{stateIndex=0}
-  (V.KEnd,[]) -> B.continue
-    s{stateIndex=length (stateDiff s)}
-  (V.KPageUp, []) -> B.continue
-    s{stateIndex=max 0 (stateIndex s - 20)}
-  (V.KPageDown, []) -> B.continue
-    s{stateIndex=min (length (stateDiff s)) (stateIndex s + 20)}
   (V.KEnter, []) -> enterEntry s
   (V.KRight, []) -> enterEntry s
   (V.KLeft, []) -> enterDirectory ".." s
-  _ -> B.continue s
+  _ -> do
+    diff' <- B.handleListEvent eventV (stateDiff s)
+    B.continue s{stateDiff = diff'}
 appHandleEvent s _ = B.continue s
 
-enterEntry :: AppState -> B.EventM n (B.Next AppState)
-enterEntry state@(AppState _ _ _ _ _ 0) = enterDirectory ".." state
-enterEntry state@(AppState _ _ _ _ diff idx) = case (left, right) of
-  (Directory, Directory) -> enterDirectory name state
-  (Missing, Directory) -> B.continue state
-  (Directory, Missing) -> B.continue state
-  _ -> enterFile name state
-  where DiffInfo name status left right = diff !! (idx - 1)
+enterEntry :: AppState -> B.EventM Name (B.Next AppState)
+enterEntry state@AppState{..} = maybe (enterDirectory ".." state)
+  (enterEntry . snd) (B.listSelectedElement stateDiff)
+  where
+    enterEntry (DiffInfo name status left right) = case (left, right) of
+      (Directory, Directory) -> enterDirectory name state
+      (Missing, Directory) -> B.continue state
+      (Directory, Missing) -> B.continue state
+      _ -> enterFile name state
 
 currentDirs :: AppState -> (FilePath, FilePath)
-currentDirs (AppState _ base1 base2 cwd _ _) = (base1 </> cwd', base2 </> cwd')
-  where cwd' = joinPath (reverse cwd)
+currentDirs AppState{..} = (stateBase1 </> cwd', stateBase2 </> cwd')
+  where cwd' = joinPath (reverse stateCwd)
 
 updateDiff :: AppState -> IO AppState
-updateDiff state@(AppState _ _ _ _ _ idx) = do
+updateDiff state@AppState{..} = do
   ds <- liftIO (uncurry diffFolders (currentDirs state))
-  return state{ stateDiff=ds, stateIndex=min idx (length ds) }
+  let elems = Vector.fromList (parentDiffInfo : ds)
+  return state{ stateDiff = B.listElementsL .~ elems $ stateDiff }
 
-enterDirectory :: String -> AppState -> B.EventM n (B.Next AppState)
-enterDirectory ".." state@(AppState _ _ _ [] _ _) = B.continue state
-enterDirectory name state@(AppState _ base1 base2 cwd _ idx) =
+enterDirectory :: String -> AppState -> B.EventM Name (B.Next AppState)
+enterDirectory ".." state@AppState{stateCwd=[]} = B.continue state
+enterDirectory name state@AppState{..} =
   B.continue =<< liftIO (updateDiff state{stateCwd=cwd'})
-  where cwd' = if name == ".." then tail cwd else name : cwd
+  where cwd' = if name == ".." then tail stateCwd else name : stateCwd
 
-enterFile :: String -> AppState -> B.EventM n (B.Next AppState)
+enterFile :: String -> AppState -> B.EventM Name (B.Next AppState)
 enterFile name state = B.suspendAndResume $ do
   let (dir1, dir2) = currentDirs state
       cmd:args = words (optionEditor (stateOpts state))
@@ -231,7 +225,7 @@ enterFile name state = B.suspendAndResume $ do
   callProcess cmd' (args ++ [dir1 </> name, dir2 </> name])
   updateDiff state
 
-appStartEvent :: AppState -> B.EventM n AppState
+appStartEvent :: AppState -> B.EventM Name AppState
 appStartEvent = liftIO . updateDiff
 
 appAttrMap :: AppState -> B.AttrMap
@@ -250,40 +244,39 @@ appAttrMap s = B.attrMap V.defAttr
   , ("filetype-socket"      , B.fg V.brightMagenta)
   , ("selected"             , V.black `B.on` V.white) ]
 
-appDraw :: AppState -> [B.Widget n]
-appDraw state@(AppState _ base1 base2 _ diff _) =
+appDraw :: AppState -> [B.Widget Name]
+appDraw state@AppState{..} =
   [ B.joinBorders $ B.vBox [ B.hBox [left, B.vBorder, right], B.hBorder, help ] ] where
-    left = drawDiff base1 diffLeft state
-    right = drawDiff base2 diffRight state
+    left = drawDiff stateBase1 diffLeft state
+    right = drawDiff stateBase2 diffRight state
     help = B.strWrap "q/esc: quit. up/down: select. enter: edit/open"
 
-drawDiff :: String -> (DiffInfo -> FileType) -> AppState -> B.Widget n
-drawDiff base ftype state@(AppState _ _ _ cwd diff idx) = B.padRight B.Max . B.vBox
-  $ drawLine False base status Directory
-  : B.hBorder
-  : drawLine (idx == 0) ".." Matching Directory
-  : [ drawLine (idx == i) name status (ftype d)
-    | (i, d@(DiffInfo name status _ _)) <- zip [1..] diff ]
+drawDiff :: String -> (DiffInfo -> FileType) -> AppState -> B.Widget Name
+drawDiff base ftype state@AppState{..} = B.padRight B.Max $ B.vBox
+  [ drawLine ftype False (DiffInfo base status Directory Directory)
+  , B.hBorder
+  , B.renderList (drawLine ftype) True (B.listNameL .~ base $ stateDiff) ]
   where
-    status = if and [diffStatus d == Matching | d <- diff]
+    status = if allOf (B.listElementsL . folded . to diffStatus) (== Matching) stateDiff
       then Matching else Different
+    upDir = isNothing (B.listSelected stateDiff)
 
-drawLine :: Bool -> String -> DiffStatus -> FileType -> B.Widget n
-drawLine selected name status ftype = B.hBox
+drawLine :: (DiffInfo -> FileType) -> Bool -> DiffInfo -> B.Widget Name
+drawLine ftype selected diff@DiffInfo{..} = B.hBox
   [ B.padRight (B.Pad 1) (drawSelect selected)
-  , B.padRight (B.Pad 1) (drawStatus status ftype)
-  , drawName name ftype ]
+  , B.padRight (B.Pad 1) (drawStatus diffStatus (ftype diff))
+  , drawName diffName (ftype diff) ]
 
-drawSelect :: Bool -> B.Widget n
+drawSelect :: Bool -> B.Widget Name
 drawSelect = bool (B.str " ")
   (B.withAttr (B.attrName "selected") (B.str " "))
 
-drawStatus :: DiffStatus -> FileType -> B.Widget n
+drawStatus :: DiffStatus -> FileType -> B.Widget Name
 drawStatus status ftype = B.withAttr
   (B.attrName ("status-" ++ name)) (B.str [statusChar status ftype])
   where name = if ftype == Missing then "missing" else map toLower (show status)
 
-drawName :: String -> FileType -> B.Widget n
+drawName :: String -> FileType -> B.Widget Name
 drawName _ Missing = B.emptyWidget
 drawName name ftype = B.withAttr
   (B.attrName ("filetype-" ++ map toLower (show ftype)))
@@ -299,6 +292,7 @@ statusChar OneSided _ = '+'
 main :: IO ()
 main = do
   opts@Options{..} <- Opt.execParser optionsParser
-  let initialState = AppState opts optionDir1 optionDir2 [] [] 0
+  let initialState = AppState opts optionDir1 optionDir2 []
+        (B.list "diff" (Vector.fromList []) 1)
   void (B.defaultMain app initialState)
 
