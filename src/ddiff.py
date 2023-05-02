@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
 from textual.app import *
@@ -6,6 +8,7 @@ from textual.containers import *
 from textual.reactive import *
 from textual.binding import *
 
+import re
 import os
 import shlex
 import argparse
@@ -55,6 +58,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-e', '--editor',
 	default='$EDITOR -d',
 	help='Program used to diff two files')
+parser.add_argument('-x', '--exclude',
+	default=[], action='append',
+	help='ignore files matching this regex')
 # parser.add_argument('-s', '--sort',
 	# default='natural',
 	# help='Order to sort files',
@@ -162,7 +168,7 @@ class DirDiffApp(App):
 		right = conf.right / self.cwd
 		self.query_one('#left > Label').update(str(left))
 		self.query_one('#right > Label').update(str(right))
-		self.diff = list(diff_dir(left, right))
+		self.diff = list(diff_dir(left, right, conf.exclude))
 	def watch_diff(self, old, new):
 		conf = self.conf
 		lview = self.query_one('#left > ListView')
@@ -205,49 +211,54 @@ diff_icons = {
 	'unknown': '?',
 }
 
-def diff_dir(left, right):
+def diff_dir(left, right, exclude):
 	lefts = natsort.natsorted(left.iterdir(), reverse=True)
 	rights = natsort.natsorted(right.iterdir(), reverse=True)
-	yield from diff_files(lefts, rights)
+	yield from diff_files(lefts, rights, exclude)
 
-def diff_files(lefts, rights):
+def diff_files(lefts, rights, exclude):
 	while lefts and rights:
 		l, r = lefts[-1], rights[-1]
 		lk, rk = natsort.natsort_key(l.name), natsort.natsort_key(r.name)
 		if lk == rk and l.name == r.name:
-			yield Entry(l.name, *diff_file(l, r))
 			lefts.pop(), rights.pop()
+			if exclude.match(l.name) is not None: continue
+			yield Entry(l.name, *diff_file(l, r, exclude))
 		elif lk < rk or (lk == rk and l.name < r.name):
+			lefts.pop()
+			if exclude.match(l.name) is not None: continue
 			yield Entry(l.name, Status.OneSided,
 				file_type(l), FileType.Missing)
-			lefts.pop()
 		else:
+			rights.pop()
+			if exclude.match(r.name) is not None: continue
 			yield Entry(r.name, Status.OneSided,
 				FileType.Missing, file_type(r))
-			rights.pop()
 	for l in lefts:
+		if exclude.match(l.name) is not None: continue
 		yield Entry(l.name, Status.OneSided,
 			file_type(l), FileType.Missing)
 	for r in rights:
+		if exclude.match(r.name) is not None: continue
 		yield Entry(r.name, Status.OneSided,
 			FileType.Missing, file_type(r))
 
-def diff_file(left, right):
+def diff_file(left, right, exclude):
 	lstat, rstat = left.stat(), right.stat()
 	ltype, rtype = file_type(left), file_type(right)
 	if lstat.st_dev == rstat.st_dev and lstat.st_ino == rstat.st_ino:
 		return Status.Matching, ltype, rtype
 	if left.is_symlink():
-		status, left, right = diff_file(left.resolve(), right)
+		status, left, right = diff_file(left.resolve(), right, exclude)
 		return status, ltype, right
 	if right.is_symlink():
-		status, left, right = diff_file(left, right.resolve())
+		status, left, right = diff_file(left, right.resolve(), exclude)
 		return status, left, rtype
 	if ltype != rtype:
 		return Status.Different, ltype, rtype
 	if left.is_dir():
 		status = Status.Matching
-		for entry in diff_dir(left, right):
+		for entry in diff_dir(left, right, exclude):
 			if entry.status == Status.Matching:
 				continue
 			if entry.status == Status.Unknown:
@@ -301,6 +312,7 @@ ansi_styles = {
 
 def main():
 	args = parser.parse_args()
+	args.exclude = re.compile('|'.join('(?:{})'.format(i) for i in args.exclude))
 	colors = {
 		'lc':'\x1b',     'rc':'m',        'rs':'0',        'cl':'\x1b[K',
 		'rs':'0',        'di':'01;34',    'ln':'01;36',    'mh':'00',
