@@ -66,8 +66,8 @@ parser.add_argument('-e', '--editor',
 	default='$EDITOR -d',
 	help='Program used to diff two files')
 parser.add_argument('-x', '--exclude',
-	default=[], action='append',
-	help='ignore files matching this regex')
+	default=[r'^\b$'], action='append',
+	help='ignore files matching regex')
 # parser.add_argument('-s', '--sort',
 	# default='natural',
 	# help='Order to sort files',
@@ -325,8 +325,11 @@ ansi_styles = {
 }
 
 def main():
+	trace('-' * 80)
 	args = parser.parse_args()
-	args.exclude = re.compile('|'.join('(?:{})'.format(i) for i in args.exclude))
+	args.exclude = re.compile('|'.join(
+		'(?:{})'.format(re.compile(i).pattern) for i in args.exclude))
+	trace(args)
 	colors = {
 		'lc':'\x1b',     'rc':'m',        'rs':'0',        'cl':'\x1b[K',
 		'rs':'0',        'di':'01;34',    'ln':'01;36',    'mh':'00',
