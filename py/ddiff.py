@@ -102,9 +102,11 @@ def file_type(path:Path):
 
 class DirDiffItem(ListItem):
 	DEFAULT_CSS = '''
+		DirDiffList > DirDiffItem.--highlight { background: $accent 33%; }
+		DirDiffList:focus > DirDiffItem.--highlight { background: $accent 33%; }
 		DirDiffItem { background: #0000; }
-		DirDiffItem .name { background: #000; }
-		DirDiffItem .type { margin-right: 1; }
+		/* DirDiffItem .name { background: #000; } */
+		DirDiffItem .type { color: $text-muted; margin-right: 1; }
 		DirDiffItem .icon {
 			width: 1;
 			margin-right: 1;
@@ -129,9 +131,11 @@ class DirDiffList(ListView):
 class DirDiffApp(App):
 	BINDINGS = [
 		Binding('q', 'quit', 'quit'),
-		Binding('e,right', 'enter', 'enter'),
-		Binding('escape,left', 'leave', 'leave'),
+		Binding('enter,e,right', 'enter', 'enter', priority=True, key_display='▶'),
+		Binding('escape,left', 'leave', 'leave', key_display='◀'),
 		Binding('r', 'refresh', 'refresh'),
+		Binding('s', 'shell(0)', 'shell-left', key_display='s'),
+		Binding('S', 'shell(1)', 'shell-right', key_display='S'),
 	]
 	CSS = '''
 		#panels {
@@ -140,13 +144,13 @@ class DirDiffApp(App):
 			background: #000;
 		}
 		.panel {
-			border: solid grey;
+			border: solid $accent;
 		}
 		.panel > Label {
 			width: 100%;
 		}
 		.panel > DirDiffList {
-			border-top: solid grey;
+			border-top: solid $accent;
 		}
 	'''
 
