@@ -22,6 +22,13 @@ from pathlib import Path
 import rich.traceback
 rich.traceback.install(show_locals=True)
 
+logfile = Path('ddiff.log')
+def trace(*args, **kwargs):
+	if logfile.exists():
+		with logfile.open('a') as file:
+			print(*args, **kwargs, file=file)
+	return args[-1]
+
 class FileType(enum.Enum):
 	Normal      = 'no'
 	Missing     = 'mi'
@@ -97,6 +104,7 @@ class DirDiffItem(ListItem):
 	DEFAULT_CSS = '''
 		DirDiffItem { background: #0000; }
 		DirDiffItem .name { background: #000; }
+		DirDiffItem .type { margin-right: 1; }
 		DirDiffItem .icon {
 			width: 1;
 			margin-right: 1;
@@ -106,6 +114,7 @@ class DirDiffItem(ListItem):
 		DirDiffItem.different .icon { background: $warning; }
 		DirDiffItem.onesided  .icon { background: $success; }
 		DirDiffItem.missing   .icon { background: $error; }
+		DirDiffItem.missing   .type { width: 0; }
 		DirDiffItem.missing   .name { width: 0; }
 		DirDiffItem.unknown   .icon { background: $secondary; }
 	'''
@@ -120,8 +129,9 @@ class DirDiffList(ListView):
 class DirDiffApp(App):
 	BINDINGS = [
 		Binding('q', 'quit', 'quit'),
-		Binding('e,l,right', 'enter', 'enter'),
-		Binding('h,escape,left', 'leave', 'leave'),
+		Binding('e,right', 'enter', 'enter'),
+		Binding('escape,left', 'leave', 'leave'),
+		Binding('r', 'refresh', 'refresh'),
 	]
 	CSS = '''
 		#panels {
@@ -141,7 +151,7 @@ class DirDiffApp(App):
 	'''
 
 	conf = var(None)
-	cwd = reactive(Path('.'))
+	cwd = reactive(Path('.'), always_update=True)
 	diff = reactive([])
 
 	def __init__(self, *args, config=None, **kwargs):
@@ -183,6 +193,7 @@ class DirDiffApp(App):
 		else: status = entry.status.name.lower()
 		return DirDiffItem(Horizontal(
 			Label(diff_icons[status], classes='icon'),
+			Label(ftype.value, classes='type'),
 			Label(entry.name, classes='name type-{}'.format(ftype.value)),
 		), classes=status)
 	def action_enter(self):
@@ -196,12 +207,15 @@ class DirDiffApp(App):
 			self.cwd = self.cwd / left.name
 		else:
 			with self.suspend():
+				print('running', cmd)
 				subprocess.run(cmd, shell=True,
 					stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
-		self.cwd = self.cwd
+		self.watch_cwd(self.cwd, self.cwd)
 	def action_leave(self):
 		if self.cwd == Path('.'): return
 		self.cwd = self.cwd.parent
+	def action_refresh(self):
+		self.watch_cwd(self.cwd, self.cwd)
 
 diff_icons = {
 	'matching': ' ',
