@@ -64,9 +64,9 @@ class Entry:
 parser = argparse.ArgumentParser()
 parser.add_argument('-e', '--editor',
 	default='$EDITOR -d',
-	help='Program used to diff two files')
+	help='program used to diff two files (default: %(default)r)')
 parser.add_argument('-x', '--exclude',
-	default=[r'^\b$'], action='append',
+	default=[r'^\b$'], action='append', metavar='REGEX',
 	help='ignore files matching regex')
 # parser.add_argument('-s', '--sort',
 	# default='natural',
@@ -164,7 +164,7 @@ class DirDiffApp(App):
 		self.conf = config
 	def compose(self):
 		yield Header()
-		with VerticalScroll(id='panels'):
+		with Container(id='panels'):
 			left, right = DirDiffList(), DirDiffList()
 			left.other, right.other = right, left
 			with Vertical(id='left', classes='panel'):
@@ -211,7 +211,6 @@ class DirDiffApp(App):
 			self.cwd = self.cwd / left.name
 		else:
 			with self.suspend():
-				print('running', cmd)
 				subprocess.run(cmd, shell=True,
 					stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 		self.watch_cwd(self.cwd, self.cwd)
@@ -220,6 +219,8 @@ class DirDiffApp(App):
 		self.cwd = self.cwd.parent
 	def action_refresh(self):
 		self.watch_cwd(self.cwd, self.cwd)
+	def action_shell(self, index):
+		trace('shell', index)
 
 diff_icons = {
 	'matching': ' ',
