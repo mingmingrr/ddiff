@@ -7,7 +7,12 @@ from textual.widgets import *
 from textual.containers import *
 from textual.reactive import *
 from textual.binding import *
+from textual.color import *
+from textual.css.styles import *
+import textual.css.parse as parse
 
+from rich.style import Style
+from rich.color import Color as RichColor
 import re
 import os
 import shlex
@@ -104,8 +109,8 @@ class DirDiffItem(ListItem):
 	DEFAULT_CSS = '''
 		DirDiffList > DirDiffItem.--highlight { background: $accent 33%; }
 		DirDiffList:focus > DirDiffItem.--highlight { background: $accent 33%; }
-		DirDiffItem { background: #0000; }
-		/* DirDiffItem .name { background: #000; } */
+		DirDiffItem { background: $background 0%; }
+		/* DirDiffItem .name { background: $background; } */
 		DirDiffItem .type { color: $text-muted; margin-right: 1; }
 		DirDiffItem .icon {
 			width: 1;
@@ -129,6 +134,7 @@ class DirDiffList(ListView):
 			self.other.index = new
 
 class DirDiffApp(App):
+	TITLE = 'DirDiff'
 	BINDINGS = [
 		Binding('q', 'quit', 'quit'),
 		Binding('enter,e,right', 'enter', 'enter', priority=True, key_display='▶'),
@@ -291,52 +297,52 @@ def diff_file(left, right, exclude):
 		return Status.Different, ltype, rtype
 	return Status.Unknown, ltype, rtype
 
-ansi_colors = [i.strip() for i in '''
-	#000000
-	#cc0000
-	#00cc00
-	#cccc00
-	#0077cc
-	#cc00dd
-	#00cccc
-	#cccccc
-'''.strip().splitlines()]
-
-ansi_bright_colors = [i.strip() for i in '''
-	#777777
-	#ff2222
-	#22ff00
-	#ffff00
-	#22aaff
-	#ff22dd
-	#00ffff
-	#ffffff
-'''.strip().splitlines()]
+def ansi_style(nums):
+	style, fg, bg = {}, None, None
+	nums = list(map(int, reversed(nums.split(';'))))
+	while nums:
+		n = nums.pop()
+		s = ansi_styles.get(n, None)
+		if s is not None: style[s] = True
+		elif 30 <= n <= 37: fg = ansi_colors[n - 30]
+		elif 90 <= n <= 97: fg = ansi_colors[n - 82]
+		elif 40 <= n <= 47: bg = ansi_colors[n - 40]
+		elif 100 <= n <= 107: bg = ansi_colors[n - 92]
+		elif n in [38, 48, 58]:
+			m, r = nums.pop(), nums.pop()
+			assert m in [2, 5], 'unknown color: {}'.format(n)
+			if m == 2: ansi_colors[r] if r < 16 else RichColor.from_ansi(r)
+			elif m == 5: c = RichColor(r, nums.pop(), nums.pop())
+			fg, bg = c if n == 38 else fg, c if n == 48 else bg
+	return style, fg, bg
 
 ansi_styles = {
-	'1': 'text-style: bold;',
-	'3': 'text-style: italic;',
-	'4': 'text-style: underline;',
-	'7': 'text-style: reverse;',
-	'9': 'text-style: strike;',
-	**{str(k): 'color: {};'.format(v)
-		for k, v in enumerate(ansi_colors, start=30)},
-	**{str(k): 'color: {};'.format(v)
-		for k, v in enumerate(ansi_bright_colors, start=90)},
-	**{str(k): 'background: {};'.format(v)
-		for k, v in enumerate(ansi_colors, start=40)},
-	**{str(k): 'background: {};'.format(v)
-		for k, v in enumerate(ansi_bright_colors, start=100)},
+	1: 'bold',
+	2: 'dim',
+	3: 'italic',
+	4: 'underline',
+	5: 'blink',
+	6: 'blink2',
+	7: 'reverse',
+	8: 'conceal',
+	9: 'strike',
+	21: 'underline2',
+	51: 'frame',
+	52: 'encircle',
+	53: 'overline',
 }
 
+ansi_colors = [RichColor.parse(i) for i in
+	('#000000 #cc0000 #00cc00 #cccc00'
+	' #0077cc #cc00dd #00cccc #cccccc'
+	' #777777 #ff2222 #22ff00 #ffff00'
+	' #22aaff #ff22dd #00ffff #ffffff').split()]
+
 def main():
-	trace('-' * 80)
 	args = parser.parse_args()
 	args.exclude = re.compile('|'.join(
 		'(?:{})'.format(re.compile(i).pattern) for i in args.exclude))
-	trace(args)
 	colors = {
-		'lc':'\x1b',     'rc':'m',        'rs':'0',        'cl':'\x1b[K',
 		'rs':'0',        'di':'01;34',    'ln':'01;36',    'mh':'00',
 		'pi':'40;33',    'so':'01;35',    'bd':'40;33;01', 'do':'01;35',
 		'cd':'40;33;01', 'or':'40;31;01', 'mi':'00',       'su':'37;41',
@@ -344,10 +350,18 @@ def main():
 		'st':'37;44',    'ex':'01;32' }
 	colors.update(x.split('=', maxsplit=1) for x in
 		os.environ.get('LS_COLORS', '').split(':') if x)
-	for ftype in FileType:
-		DirDiffApp.CSS += '\nDirDiffItem Label.type-{} {{ {} }}'.format(ftype.value,
-			''.join(ansi_styles.get(style.lstrip('0'), '')
-				for style in colors.get(ftype.value, '').split(';')))
-	DirDiffApp(config=args).run()
+	styles = [DirDiffApp.CSS]
+	for k, v in colors.items():
+		css = 'DirDiffItem Label.type-{} {{}}'.format(k)
+		css = next(parse.parse(css, '<generated: {}>'.format(__file__)))
+		style, fg, bg = ansi_style(v)
+		if style: css.styles.set_rule('text_style', Style(**style))
+		if fg: css.styles.set_rule('color', Color.from_rich_color(fg))
+		if bg: css.styles.set_rule('color', Color.from_rich_color(bg))
+		if fg or bg: css.styles.set_rule('auto_color', False)
+		styles.append(css.css)
+	DirDiffApp.CSS = '\n'.join(styles)
+	app = DirDiffApp(config=args)
+	app.run()
 
 if __name__ == '__main__': main()
