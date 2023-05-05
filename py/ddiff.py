@@ -13,6 +13,7 @@ import textual.css.parse as parse
 
 from rich.style import Style
 from rich.color import Color as RichColor
+
 import re
 import os
 import shlex
@@ -22,10 +23,11 @@ import dataclasses
 import subprocess
 import filecmp
 import natsort
+import asyncio
 from pathlib import Path
 
-import rich.traceback
-rich.traceback.install(show_locals=True)
+# import rich.traceback
+# rich.traceback.install(show_locals=True)
 
 logfile = Path('ddiff.log')
 def trace(*args, **kwargs):
@@ -52,19 +54,14 @@ class FileType(enum.Enum):
 	NamedPipe   = 'pi'
 	Socket      = 'so'
 	Door        = 'do'
+	Unknown     = 'uk'
 
 class Status(enum.Enum):
-	Matching  = enum.auto()
-	Unknown   = enum.auto()
-	Different = enum.auto()
-	OneSided  = enum.auto()
-
-@dataclasses.dataclass
-class Entry:
-	name:   str
-	status: Status
-	left:   FileType
-	right:  FileType
+	Matching  = '  '
+	Unknown   = '??'
+	Different = '**'
+	LeftOnly  = '+-'
+	RightOnly = '-+'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-e', '--editor',
@@ -105,120 +102,120 @@ def file_type(path:Path):
 	if stat.st_mode & 0o00111: return FileType.Executable
 	return FileType.File
 
-class DirDiffItem(ListItem):
+class DirDiffEntry(ListItem):
 	DEFAULT_CSS = '''
-		DirDiffList > DirDiffItem.--highlight { background: $accent 33%; }
-		DirDiffList:focus > DirDiffItem.--highlight { background: $accent 33%; }
-		DirDiffItem { background: $background 0%; }
-		/* DirDiffItem .name { background: $background; } */
-		DirDiffItem .type { color: $text-muted; margin-right: 1; }
-		DirDiffItem .icon {
-			width: 1;
-			margin-right: 1;
-			text-style: bold;
-			color: #000;
-		}
-		DirDiffItem.different .icon { background: $warning; }
-		DirDiffItem.onesided  .icon { background: $success; }
-		DirDiffItem.missing   .icon { background: $error; }
-		DirDiffItem.missing   .type { width: 0; }
-		DirDiffItem.missing   .name { width: 0; }
-		DirDiffItem.unknown   .icon { background: $secondary; }
+		ListView > DirDiffEntry.--highlight { background: $accent 33%; }
+		ListView:focus > DirDiffEntry.--highlight { background: $accent 33%; }
+		DirDiffEntry { background: $background 0%; }
+		DirDiffEntry .icon { width: 1; margin-right: 1; text-style: bold; color: black; }
+		DirDiffEntry .type { color: $text-muted; margin-right: 1; }
+		DirDiffEntry .side { width: 1fr; }
+		DirDiffEntry .left { border-right: solid $primary; }
+		DirDiffEntry.different .icon { background: $warning; }
+		DirDiffEntry.unknown   .icon { background: $secondary; }
+		DirDiffEntry.leftonly  .right .icon { background: $error; }
+		DirDiffEntry.leftonly  .right .type { width: 0; }
+		DirDiffEntry.leftonly  .right .name { width: 0; }
+		DirDiffEntry.rightonly .left  .icon { background: $error; }
+		DirDiffEntry.rightonly .left  .type { width: 0; }
+		DirDiffEntry.rightonly .left  .name { width: 0; }
+		DirDiffEntry.leftonly  .left  .icon { background: $success; }
+		DirDiffEntry.rightonly .right .icon { background: $success; }
 	'''
-
-class DirDiffList(ListView):
-	other = var(None)
-	def watch_index(self, old, new):
-		super().watch_index(old, new)
-		if self.other.index != new:
-			self.other.index = new
+	name   = var(None)
+	status = reactive(Status.Unknown, always_update=True, init=False)
+	left   = reactive(FileType.Unknown, always_update=True, init=False)
+	right  = reactive(FileType.Unknown, always_update=True, init=False)
+	def __init__(self, name, *args, status=Status.Unknown,
+			left=FileType.Unknown, right=FileType.Unknown, **kwargs):
+		super().__init__(Horizontal(self.make_side(name, 'left'),
+			self.make_side(name, 'right')), *args, **kwargs)
+		self.name = name
+		self.status = status
+		self.left = left
+		self.right = right
+	@staticmethod
+	def make_side(name, side):
+		return Horizontal(
+			Label('', classes='icon'),
+			Label('', classes='type'),
+			Label(name, classes='name'),
+			classes='side {}'.format(side))
+	def watch_left(self, old, new):
+		self.watch_side('left', old, new)
+	def watch_right(self, old, new):
+		self.watch_side('right', old, new)
+	def watch_side(self, side, old, new):
+		side = self.query_one('.{}'.format(side))
+		name = side.query_one('.name')
+		name.remove_class('type-{}'.format(old.value))
+		name.add_class('type-{}'.format(new.value))
+		side.query_one('.type').update(new.value)
+	def watch_status(self, old, new):
+		self.remove_class(old.name.lower())
+		self.add_class(new.name.lower())
+		left = self.query_one('.left')
+		right = self.query_one('.right')
+		left.query_one('.icon').update(new.value[0])
+		right.query_one('.icon').update(new.value[1])
 
 class DirDiffApp(App):
 	TITLE = 'DirDiff'
 	BINDINGS = [
 		Binding('q', 'quit', 'quit'),
-		Binding('enter,e,right', 'enter', 'enter', priority=True, key_display='▶'),
-		Binding('escape,left', 'leave', 'leave', key_display='◀'),
+		Binding('e,right', 'select', 'select', priority=True, key_display='▶'),
+		Binding('escape,left', 'leave', 'leave', priority=True, key_display='◀'),
 		Binding('r', 'refresh', 'refresh'),
 		Binding('s', 'shell(0)', 'shell-left', key_display='s'),
 		Binding('S', 'shell(1)', 'shell-right', key_display='S'),
 	]
 	CSS = '''
-		#panels {
-			layout: grid;
-			grid_size: 2 1;
-			background: #000;
-		}
-		.panel {
-			border: solid $accent;
-		}
-		.panel > Label {
-			width: 100%;
-		}
-		.panel > DirDiffList {
-			border-top: solid $accent;
-		}
+		$background: #000;
+		#paths { height: 1; overflow-y: scroll; }
+		#paths Label { width: 1fr }
+		#paths .left { border-right: solid $primary; }
+		#files { background: $background; height: 1fr; overflow-y: scroll; }
 	'''
-
 	conf = var(None)
 	cwd = reactive(Path('.'), always_update=True)
-	diff = reactive([])
-
 	def __init__(self, *args, config=None, **kwargs):
 		super().__init__(*args, **kwargs)
 		assert config is not None
 		self.conf = config
 	def compose(self):
-		yield Header()
-		with Container(id='panels'):
-			left, right = DirDiffList(), DirDiffList()
-			left.other, right.other = right, left
-			with Vertical(id='left', classes='panel'):
-				yield Label('')
-				yield left
-			with Vertical(id='right', classes='panel'):
-				yield Label('')
-				yield right
+		yield Header(show_clock=True)
+		with Horizontal(id='paths'):
+			yield Label(str(self.conf.left), classes='left')
+			yield Label(str(self.conf.right), classes='right')
+		yield ListView(id='files')
 		yield Footer()
 	def on_mount(self):
-		self.query_one('#left > ListView').focus()
-	def watch_cwd(self, old, new):
-		conf = self.conf
-		left = conf.left / self.cwd
-		right = conf.right / self.cwd
-		self.query_one('#left > Label').update(str(left))
-		self.query_one('#right > Label').update(str(right))
-		self.diff = list(diff_dir(left, right, conf.exclude))
-	def watch_diff(self, old, new):
-		conf = self.conf
-		lview = self.query_one('#left > ListView')
-		rview = self.query_one('#right > ListView')
-		lview.clear(); rview.clear()
-		for entry in new:
-			lview.append(self.make_item(entry, entry.left))
-			rview.append(self.make_item(entry, entry.right))
-	@staticmethod
-	def make_item(entry, ftype):
-		if ftype == FileType.Missing: status = 'missing'
-		else: status = entry.status.name.lower()
-		return DirDiffItem(Horizontal(
-			Label(diff_icons[status], classes='icon'),
-			Label(ftype.value, classes='type'),
-			Label(entry.name, classes='name type-{}'.format(ftype.value)),
-		), classes=status)
-	def action_enter(self):
-		index = self.query_one('#left > ListView').index
-		entry = self.diff[index]
+		self.query_one('#files').focus()
+	async def watch_cwd(self, old, new):
+		left = self.conf.left / self.cwd
+		right = self.conf.right / self.cwd
+		self.query_one('#paths .left').update(str(left))
+		self.query_one('#paths .right').update(str(right))
+		files = self.query_one('#files')
+		files.clear()
+		async for name, status, l, r in diff_dir(left, right, self.conf.exclude):
+			files.append(DirDiffEntry(name, status=status, left=l, right=r))
+	@property
+	def selected(self):
+		files = self.query_one('#files')
+		return files.children[files.index]
+	def action_select(self):
+		entry = self.selected
 		path = self.cwd / entry.name
 		left, right = self.conf.left / path, self.conf.right / path
 		cmd = '{} {} {}'.format(self.conf.editor,
 			shlex.quote(str(left)), shlex.quote(str(right)))
 		if left.is_dir() and right.is_dir() and left.name == right.name:
 			self.cwd = self.cwd / left.name
-		else:
-			with self.suspend():
-				subprocess.run(cmd, shell=True,
-					stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+			return
+		with self.suspend():
+			subprocess.run(cmd, shell=True,
+				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 		self.watch_cwd(self.cwd, self.cwd)
 	def action_leave(self):
 		if self.cwd == Path('.'): return
@@ -226,76 +223,72 @@ class DirDiffApp(App):
 	def action_refresh(self):
 		self.watch_cwd(self.cwd, self.cwd)
 	def action_shell(self, index):
-		trace('shell', index)
+		path = [self.conf.left, self.conf.right][index] / self.cwd
+		with self.suspend():
+			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
+				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
-diff_icons = {
-	'matching': ' ',
-	'different': '*',
-	'onesided': '+',
-	'missing': '-',
-	'unknown': '?',
-}
-
-def diff_dir(left, right, exclude):
+async def diff_dir(left, right, exclude):
 	lefts = natsort.natsorted(left.iterdir(), reverse=True)
 	rights = natsort.natsorted(right.iterdir(), reverse=True)
-	yield from diff_files(lefts, rights, exclude)
+	async for i in diff_files(lefts, rights, exclude): yield i
 
-def diff_files(lefts, rights, exclude):
+async def diff_files(lefts, rights, exclude):
 	while lefts and rights:
+		await asyncio.sleep(0)
 		l, r = lefts[-1], rights[-1]
 		lk, rk = natsort.natsort_key(l.name), natsort.natsort_key(r.name)
 		if lk == rk and l.name == r.name:
 			lefts.pop(), rights.pop()
 			if exclude.match(l.name) is not None: continue
-			yield Entry(l.name, *diff_file(l, r, exclude))
+			yield (l.name, *(await diff_file(l, r, exclude)))
 		elif lk < rk or (lk == rk and l.name < r.name):
 			lefts.pop()
 			if exclude.match(l.name) is not None: continue
-			yield Entry(l.name, Status.OneSided,
+			yield (l.name, Status.LeftOnly,
 				file_type(l), FileType.Missing)
 		else:
 			rights.pop()
 			if exclude.match(r.name) is not None: continue
-			yield Entry(r.name, Status.OneSided,
+			yield (r.name, Status.RightOnly,
 				FileType.Missing, file_type(r))
 	for l in lefts:
 		if exclude.match(l.name) is not None: continue
-		yield Entry(l.name, Status.OneSided,
+		yield (l.name, Status.LeftOnly,
 			file_type(l), FileType.Missing)
 	for r in rights:
 		if exclude.match(r.name) is not None: continue
-		yield Entry(r.name, Status.OneSided,
+		yield (r.name, Status.RightOnly,
 			FileType.Missing, file_type(r))
 
-def diff_file(left, right, exclude):
+async def diff_file(left, right, exclude):
 	lstat, rstat = left.stat(), right.stat()
 	ltype, rtype = file_type(left), file_type(right)
 	if lstat.st_dev == rstat.st_dev and lstat.st_ino == rstat.st_ino:
-		return Status.Matching, ltype, rtype
+		return (Status.Matching, ltype, rtype)
 	if left.is_symlink():
-		status, left, right = diff_file(left.resolve(), right, exclude)
-		return status, ltype, right
+		status, left, right = await diff_file(left.resolve(), right, exclude)
+		return (status, ltype, right)
 	if right.is_symlink():
-		status, left, right = diff_file(left, right.resolve(), exclude)
-		return status, left, rtype
-	if ltype != rtype:
-		return Status.Different, ltype, rtype
-	if left.is_dir():
+		status, left, right = await diff_file(left, right.resolve(), exclude)
+		return (status, left, rtype)
+	if left.is_dir() and right.is_dir():
 		status = Status.Matching
-		for entry in diff_dir(left, right, exclude):
-			if entry.status == Status.Matching:
+		async for entry in diff_dir(left, right, exclude):
+			if entry[1] == Status.Matching:
 				continue
-			if entry.status == Status.Unknown:
+			if entry[1] == Status.Unknown:
 				status = Status.Unknown
 				continue
-			return Status.Different, ltype, rtype
-		return status, ltype, rtype
-	if left.is_file():
+			return (Status.Different, ltype, rtype)
+		return (status, ltype, rtype)
+	if left.is_file() and right.is_file():
 		if filecmp.cmp(left, right):
-			return Status.Matching, ltype, rtype
-		return Status.Different, ltype, rtype
-	return Status.Unknown, ltype, rtype
+			return (Status.Matching, ltype, rtype)
+		return (Status.Different, ltype, rtype)
+	if ltype != rtype:
+		return (Status.Different, ltype, rtype)
+	return (Status.Unknown, ltype, rtype)
 
 def ansi_style(nums):
 	style, fg, bg = {}, None, None
@@ -342,17 +335,18 @@ def main():
 	args = parser.parse_args()
 	args.exclude = re.compile('|'.join(
 		'(?:{})'.format(re.compile(i).pattern) for i in args.exclude))
+	trace('-' * 80)
 	colors = {
 		'rs':'0',        'di':'01;34',    'ln':'01;36',    'mh':'00',
 		'pi':'40;33',    'so':'01;35',    'bd':'40;33;01', 'do':'01;35',
 		'cd':'40;33;01', 'or':'40;31;01', 'mi':'00',       'su':'37;41',
 		'sg':'30;43',    'ca':'00',       'tw':'30;42',    'ow':'34;42',
-		'st':'37;44',    'ex':'01;32' }
+		'st':'37;44',    'ex':'01;32',    'uk':'02;03', }
 	colors.update(x.split('=', maxsplit=1) for x in
 		os.environ.get('LS_COLORS', '').split(':') if x)
 	styles = [DirDiffApp.CSS]
 	for k, v in colors.items():
-		css = 'DirDiffItem Label.type-{} {{}}'.format(k)
+		css = 'DirDiffEntry Label.type-{} {{}}'.format(k)
 		css = next(parse.parse(css, '<generated: {}>'.format(__file__)))
 		style, fg, bg = ansi_style(v)
 		if style: css.styles.set_rule('text_style', Style(**style))
