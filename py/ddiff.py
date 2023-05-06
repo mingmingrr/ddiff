@@ -200,13 +200,10 @@ class DirDiffApp(App):
 		files.clear()
 		async for name, status, l, r in diff_dir(left, right, self.conf.exclude):
 			files.append(DirDiffEntry(name, status=status, left=l, right=r))
-	@property
-	def selected(self):
-		files = self.query_one('#files')
-		return files.children[files.index]
 	def action_select(self):
-		entry = self.selected
-		path = self.cwd / entry.name
+		self.query_one('#files').action_select_cursor()
+	def on_list_view_selected(self, message):
+		path = self.cwd / message.item.name
 		left, right = self.conf.left / path, self.conf.right / path
 		cmd = '{} {} {}'.format(self.conf.editor,
 			shlex.quote(str(left)), shlex.quote(str(right)))
