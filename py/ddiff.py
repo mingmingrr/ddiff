@@ -137,8 +137,8 @@ class DirDiffEntry(ListItem):
 	@staticmethod
 	def make_side(name, side):
 		return Horizontal(
-			Label('', classes='icon'),
-			Label('', classes='type'),
+			Label('?', classes='icon'),
+			Label('??', classes='type'),
 			Label(name, classes='name'),
 			classes='side {}'.format(side))
 	def watch_left(self, old, new):
@@ -176,12 +176,12 @@ class DirDiffApp(App):
 		#paths .left { border-right: solid $primary; }
 		#files { background: $background; height: 1fr; overflow-y: scroll; }
 	'''
-	conf = var(None)
 	cwd = reactive(Path('.'), always_update=True)
 	def __init__(self, *args, config=None, **kwargs):
 		super().__init__(*args, **kwargs)
 		assert config is not None
 		self.conf = config
+		self.index_cache = dict()
 	def compose(self):
 		yield Header(show_clock=True)
 		with Horizontal(id='paths'):
@@ -198,8 +198,9 @@ class DirDiffApp(App):
 		self.query_one('#paths .right').update(str(right))
 		files = self.query_one('#files')
 		files.clear()
-		async for name, status, l, r in diff_dir(left, right, self.conf.exclude):
+		async for name, status, l, r in diff_dirs(left, right, self.conf.exclude):
 			files.append(DirDiffEntry(name, status=status, left=l, right=r))
+		files.index = self.index_cache.get(self.cwd, 0)
 	def action_select(self):
 		self.query_one('#files').action_select_cursor()
 	def on_list_view_selected(self, message):
@@ -214,6 +215,8 @@ class DirDiffApp(App):
 			subprocess.run(cmd, shell=True,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 		self.watch_cwd(self.cwd, self.cwd)
+	def on_list_view_highlighted(self, message):
+		self.index_cache[self.cwd] = message.list_view.index
 	def action_leave(self):
 		if self.cwd == Path('.'): return
 		self.cwd = self.cwd.parent
@@ -225,10 +228,26 @@ class DirDiffApp(App):
 			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
-async def diff_dir(left, right, exclude):
+async def diff_dirs(left, right, exclude):
 	lefts = natsort.natsorted(left.iterdir(), reverse=True)
 	rights = natsort.natsorted(right.iterdir(), reverse=True)
 	async for i in diff_files(lefts, rights, exclude): yield i
+
+async def diff_dir(left, right, exclude):
+	lefts = [i for i in left.iterdir() if exclude.match(i.name) is None]
+	rights = [i for i in right.iterdir() if exclude.match(i.name) is None]
+	if len(lefts) != len(rights): return Status.Different
+	lefts.sort(reverse=True), rights.sort(reverse=True)
+	for l, r in zip(lefts, rights):
+		if l.name != r.name: return Status.Different
+	status = Status.Matching
+	for l, r in zip(lefts, rights):
+		entry = await diff_file(l, r, exclude)
+		if entry[0] == Status.Matching: continue
+		if entry[0] == Status.Unknown:
+			status = Status.Unknown ; continue
+		return Status.Different
+	return status
 
 async def diff_files(lefts, rights, exclude):
 	while lefts and rights:
@@ -270,15 +289,7 @@ async def diff_file(left, right, exclude):
 		status, left, right = await diff_file(left, right.resolve(), exclude)
 		return (status, left, rtype)
 	if left.is_dir() and right.is_dir():
-		status = Status.Matching
-		async for entry in diff_dir(left, right, exclude):
-			if entry[1] == Status.Matching:
-				continue
-			if entry[1] == Status.Unknown:
-				status = Status.Unknown
-				continue
-			return (Status.Different, ltype, rtype)
-		return (status, ltype, rtype)
+		return (await diff_dir(left, right, exclude), ltype, rtype)
 	if left.is_file() and right.is_file():
 		if filecmp.cmp(left, right):
 			return (Status.Matching, ltype, rtype)
