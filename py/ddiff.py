@@ -215,10 +215,9 @@ class DirDiffApp(App):
 			if index % 4 == 0: await append
 		await asyncio.sleep(0)
 		files.index = self.index_cache.get(self.cwd, 0)
-		for name, *args in diff_dirs(left, right, self.conf.exclude):
-			if name not in entries: continue
-			entry = entries[name]
-			entry.status, entry.left, entry.right = args
+		for name, entry in entries.items():
+			entry.status, entry.left, entry.right = \
+				diff_file(left / name, right / name, self.conf.exclude)
 			await asyncio.sleep(0)
 	def action_select(self):
 		self.query_one('#files').action_select_cursor()
@@ -247,16 +246,11 @@ class DirDiffApp(App):
 			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
-def diff_dirs(left, right, exclude):
-	lefts = natsort.natsorted(left.iterdir(), reverse=True)
-	rights = natsort.natsorted(right.iterdir(), reverse=True)
-	return diff_files(lefts, rights, exclude)
-
 def diff_dir(left, right, exclude):
 	lefts = [i for i in left.iterdir() if exclude.match(i.name) is None]
 	rights = [i for i in right.iterdir() if exclude.match(i.name) is None]
 	if len(lefts) != len(rights): return Status.Different
-	lefts.sort(reverse=True), rights.sort(reverse=True)
+	lefts.sort(), rights.sort()
 	for l, r in zip(lefts, rights):
 		if l.name != r.name: return Status.Different
 	status = Status.Matching
@@ -267,33 +261,6 @@ def diff_dir(left, right, exclude):
 			status = Status.Unknown ; continue
 		return Status.Different
 	return status
-
-def diff_files(lefts, rights, exclude):
-	while lefts and rights:
-		l, r = lefts[-1], rights[-1]
-		lk, rk = natsort.natsort_key(l.name), natsort.natsort_key(r.name)
-		if lk == rk and l.name == r.name:
-			lefts.pop(), rights.pop()
-			if exclude.match(l.name) is not None: continue
-			yield (l.name, *diff_file(l, r, exclude))
-		elif lk < rk or (lk == rk and l.name < r.name):
-			lefts.pop()
-			if exclude.match(l.name) is not None: continue
-			yield (l.name, Status.LeftOnly,
-				file_type(l), FileType.Missing)
-		else:
-			rights.pop()
-			if exclude.match(r.name) is not None: continue
-			yield (r.name, Status.RightOnly,
-				FileType.Missing, file_type(r))
-	for l in lefts:
-		if exclude.match(l.name) is not None: continue
-		yield (l.name, Status.LeftOnly,
-			file_type(l), FileType.Missing)
-	for r in rights:
-		if exclude.match(r.name) is not None: continue
-		yield (r.name, Status.RightOnly,
-			FileType.Missing, file_type(r))
 
 def diff_file(left, right, exclude):
 	lstat, rstat = left.stat(), right.stat()
