@@ -105,7 +105,7 @@ def file_type(path:Path):
 
 class DirDiffEntry(ListItem):
 	DEFAULT_CSS = '''
-		ListView > DirDiffEntry.--highlight { background: $accent 33%; }
+		ListView       > DirDiffEntry.--highlight { background: $accent 33%; }
 		ListView:focus > DirDiffEntry.--highlight { background: $accent 33%; }
 		DirDiffEntry { background: $background 0%; }
 		DirDiffEntry .icon { width: 1; margin-right: 1; text-style: bold; color: black; }
@@ -113,7 +113,7 @@ class DirDiffEntry(ListItem):
 		DirDiffEntry .side { width: 1fr; }
 		DirDiffEntry .left { border-right: solid $primary; }
 		DirDiffEntry.different .icon { background: $warning; }
-		DirDiffEntry.unknown   .icon { background: $secondary; }
+		DirDiffEntry.unknown   .icon { background: $primary-background; }
 		DirDiffEntry.leftonly  .right .icon { background: $error; }
 		DirDiffEntry.leftonly  .right .type { width: 0; }
 		DirDiffEntry.leftonly  .right .name { width: 0; }
@@ -200,15 +200,23 @@ class DirDiffApp(App):
 		files = self.query_one('#files')
 		files.clear()
 		entries = dict()
+		lefts, rights = set(left.iterdir()), set(right.iterdir())
 		sortedfiles = natsort.natsorted(set(i.name
-			for i in itertools.chain(left.iterdir(), right.iterdir())))
+			for i in itertools.chain(lefts, rights)))
 		for index, name in enumerate(sortedfiles):
-			entry = entries[name] = DirDiffEntry(name)
+			if self.conf.exclude.search(name) is not None: continue
+			l, r = left.joinpath(name) in lefts, right.joinpath(name) in rights
+			if l and r: entry = entries[name] = DirDiffEntry(name)
+			elif l: entry = DirDiffEntry(name, status=Status.LeftOnly,
+				left=file_type(left.joinpath(name)), right=FileType.Missing)
+			else: entry = DirDiffEntry(name, status=Status.RightOnly,
+				left=FileType.Missing, right=file_type(right.joinpath(name)))
 			append = files.append(entry)
 			if index % 4 == 0: await append
 		await asyncio.sleep(0)
 		files.index = self.index_cache.get(self.cwd, 0)
 		for name, *args in diff_dirs(left, right, self.conf.exclude):
+			if name not in entries: continue
 			entry = entries[name]
 			entry.status, entry.left, entry.right = args
 			await asyncio.sleep(0)
