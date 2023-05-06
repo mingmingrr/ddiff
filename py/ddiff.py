@@ -24,6 +24,7 @@ import subprocess
 import filecmp
 import natsort
 import asyncio
+import itertools
 from pathlib import Path
 
 # import rich.traceback
@@ -198,9 +199,19 @@ class DirDiffApp(App):
 		self.query_one('#paths .right').update(str(right))
 		files = self.query_one('#files')
 		files.clear()
-		async for name, status, l, r in diff_dirs(left, right, self.conf.exclude):
-			files.append(DirDiffEntry(name, status=status, left=l, right=r))
+		entries = dict()
+		sortedfiles = natsort.natsorted(set(i.name
+			for i in itertools.chain(left.iterdir(), right.iterdir())))
+		for index, name in enumerate(sortedfiles):
+			entry = entries[name] = DirDiffEntry(name)
+			append = files.append(entry)
+			if index % 4 == 0: await append
+		await asyncio.sleep(0)
 		files.index = self.index_cache.get(self.cwd, 0)
+		for name, *args in diff_dirs(left, right, self.conf.exclude):
+			entry = entries[name]
+			entry.status, entry.left, entry.right = args
+			await asyncio.sleep(0)
 	def action_select(self):
 		self.query_one('#files').action_select_cursor()
 	def on_list_view_selected(self, message):
@@ -228,12 +239,12 @@ class DirDiffApp(App):
 			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
-async def diff_dirs(left, right, exclude):
+def diff_dirs(left, right, exclude):
 	lefts = natsort.natsorted(left.iterdir(), reverse=True)
 	rights = natsort.natsorted(right.iterdir(), reverse=True)
-	async for i in diff_files(lefts, rights, exclude): yield i
+	return diff_files(lefts, rights, exclude)
 
-async def diff_dir(left, right, exclude):
+def diff_dir(left, right, exclude):
 	lefts = [i for i in left.iterdir() if exclude.match(i.name) is None]
 	rights = [i for i in right.iterdir() if exclude.match(i.name) is None]
 	if len(lefts) != len(rights): return Status.Different
@@ -242,22 +253,21 @@ async def diff_dir(left, right, exclude):
 		if l.name != r.name: return Status.Different
 	status = Status.Matching
 	for l, r in zip(lefts, rights):
-		entry = await diff_file(l, r, exclude)
+		entry = diff_file(l, r, exclude)
 		if entry[0] == Status.Matching: continue
 		if entry[0] == Status.Unknown:
 			status = Status.Unknown ; continue
 		return Status.Different
 	return status
 
-async def diff_files(lefts, rights, exclude):
+def diff_files(lefts, rights, exclude):
 	while lefts and rights:
-		await asyncio.sleep(0)
 		l, r = lefts[-1], rights[-1]
 		lk, rk = natsort.natsort_key(l.name), natsort.natsort_key(r.name)
 		if lk == rk and l.name == r.name:
 			lefts.pop(), rights.pop()
 			if exclude.match(l.name) is not None: continue
-			yield (l.name, *(await diff_file(l, r, exclude)))
+			yield (l.name, *diff_file(l, r, exclude))
 		elif lk < rk or (lk == rk and l.name < r.name):
 			lefts.pop()
 			if exclude.match(l.name) is not None: continue
@@ -277,19 +287,19 @@ async def diff_files(lefts, rights, exclude):
 		yield (r.name, Status.RightOnly,
 			FileType.Missing, file_type(r))
 
-async def diff_file(left, right, exclude):
+def diff_file(left, right, exclude):
 	lstat, rstat = left.stat(), right.stat()
 	ltype, rtype = file_type(left), file_type(right)
 	if lstat.st_dev == rstat.st_dev and lstat.st_ino == rstat.st_ino:
 		return (Status.Matching, ltype, rtype)
 	if left.is_symlink():
-		status, left, right = await diff_file(left.resolve(), right, exclude)
+		status, left, right = diff_file(left.resolve(), right, exclude)
 		return (status, ltype, right)
 	if right.is_symlink():
-		status, left, right = await diff_file(left, right.resolve(), exclude)
+		status, left, right = diff_file(left, right.resolve(), exclude)
 		return (status, left, rtype)
 	if left.is_dir() and right.is_dir():
-		return (await diff_dir(left, right, exclude), ltype, rtype)
+		return diff_dir(left, right, exclude), ltype, rtype
 	if left.is_file() and right.is_file():
 		if filecmp.cmp(left, right):
 			return (Status.Matching, ltype, rtype)
@@ -343,7 +353,6 @@ def main():
 	args = parser.parse_args()
 	args.exclude = re.compile('|'.join(
 		'(?:{})'.format(re.compile(i).pattern) for i in args.exclude))
-	trace('-' * 80)
 	colors = {
 		'rs':'0',        'di':'01;34',    'ln':'01;36',    'mh':'00',
 		'pi':'40;33',    'so':'01;35',    'bd':'40;33;01', 'do':'01;35',
