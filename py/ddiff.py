@@ -104,25 +104,25 @@ def file_type(path:Path):
 	if mode & executable: return FileType.Executable
 	return FileType.File
 
-class DirDiffEntry(ListItem):
+class DiffEntry(ListItem):
 	DEFAULT_CSS = '''
-		ListView       > DirDiffEntry.--highlight { background: $accent 33%; }
-		ListView:focus > DirDiffEntry.--highlight { background: $accent 33%; }
-		DirDiffEntry { background: $background 0%; }
-		DirDiffEntry .icon { width: 1; margin-right: 1; text-style: bold; color: black; }
-		DirDiffEntry .type { color: $text-muted; margin-right: 1; }
-		DirDiffEntry .side { width: 1fr; }
-		DirDiffEntry .left { border-right: solid $primary; }
-		DirDiffEntry.different .icon { background: $warning; }
-		DirDiffEntry.unknown   .icon { background: $primary-background; }
-		DirDiffEntry.leftonly  .right .icon { background: $error; }
-		DirDiffEntry.leftonly  .right .type { width: 0; }
-		DirDiffEntry.leftonly  .right .name { width: 0; }
-		DirDiffEntry.rightonly .left  .icon { background: $error; }
-		DirDiffEntry.rightonly .left  .type { width: 0; }
-		DirDiffEntry.rightonly .left  .name { width: 0; }
-		DirDiffEntry.leftonly  .left  .icon { background: $success; }
-		DirDiffEntry.rightonly .right .icon { background: $success; }
+		ListView       > DiffEntry.--highlight { background: $accent 33%; }
+		ListView:focus > DiffEntry.--highlight { background: $accent 33%; }
+		DiffEntry { background: $background 0%; }
+		DiffEntry .icon { width: 1; margin-right: 1; text-style: bold; color: black; }
+		DiffEntry .type { color: $text-muted; margin-right: 1; }
+		DiffEntry .side { width: 1fr; }
+		DiffEntry .left { border-right: solid $primary; }
+		DiffEntry.different .icon { background: $warning; }
+		DiffEntry.unknown   .icon { background: $primary-background; }
+		DiffEntry.leftonly  .right .icon { background: $error; }
+		DiffEntry.leftonly  .right .type { width: 0; }
+		DiffEntry.leftonly  .right .name { width: 0; }
+		DiffEntry.rightonly .left  .icon { background: $error; }
+		DiffEntry.rightonly .left  .type { width: 0; }
+		DiffEntry.rightonly .left  .name { width: 0; }
+		DiffEntry.leftonly  .left  .icon { background: $success; }
+		DiffEntry.rightonly .right .icon { background: $success; }
 	'''
 	name   = var(None)
 	status = reactive(Status.Unknown, always_update=True, init=False)
@@ -168,8 +168,8 @@ class DirDiffApp(App):
 		Binding('e,right', 'select', 'select', priority=True, key_display='▶'),
 		Binding('escape,left', 'leave', 'leave', priority=True, key_display='◀'),
 		Binding('r', 'refresh', 'refresh'),
-		Binding('s', 'shell(0)', 'shell-left', key_display='s'),
-		Binding('S', 'shell(1)', 'shell-right', key_display='S'),
+		Binding('s', 'shell("left")', 'shell-left', key_display='s'),
+		Binding('S', 'shell("right")', 'shell-right', key_display='S'),
 	]
 	CSS = '''
 		$background: #000;
@@ -207,11 +207,11 @@ class DirDiffApp(App):
 		for index, name in enumerate(sortedfiles):
 			if self.conf.exclude.search(name) is not None: continue
 			l, r = left.joinpath(name) in lefts, right.joinpath(name) in rights
-			if l and r: entry = entries[name] = DirDiffEntry(name,
+			if l and r: entry = entries[name] = DiffEntry(name,
 				left=file_type(left / name), right=file_type(right / name))
-			elif l: entry = DirDiffEntry(name, status=Status.LeftOnly,
+			elif l: entry = DiffEntry(name, status=Status.LeftOnly,
 				left=file_type(left / name), right=FileType.Missing)
-			else: entry = DirDiffEntry(name, status=Status.RightOnly,
+			else: entry = DiffEntry(name, status=Status.RightOnly,
 				left=FileType.Missing, right=file_type(right / name))
 			append = files.append(entry)
 			if index % 4 == 0: await append
@@ -241,8 +241,8 @@ class DirDiffApp(App):
 		self.cwd = self.cwd.parent
 	def action_refresh(self):
 		self.cwd = self.cwd
-	def action_shell(self, index):
-		path = [self.conf.left, self.conf.right][index] / self.cwd
+	def action_shell(self, side):
+		path = getattr(self.conf, side) / self.cwd
 		with self.suspend():
 			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
@@ -337,8 +337,8 @@ def main():
 		os.environ.get('LS_COLORS', '').split(':') if x)
 	styles = [DirDiffApp.CSS]
 	for k, v in colors.items():
-		css = 'DirDiffEntry Label.type-{} {{}}'.format(k)
-		css = next(parse.parse(css, '<generated: {}>'.format(__file__)))
+		css = next(parse.parse('DiffEntry .type-{} {{}}'.format(k),
+			'<generated: {}>'.format(__file__)))
 		style, fg, bg = ansi_style(v)
 		if style: css.styles.set_rule('text_style', Style(**style))
 		if fg: css.styles.set_rule('color', Color.from_rich_color(fg))
