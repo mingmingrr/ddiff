@@ -14,6 +14,7 @@ import textual.css.parse as parse
 from rich.style import Style
 from rich.color import Color as RichColor
 
+import stat
 import re
 import os
 import shlex
@@ -79,28 +80,28 @@ parser.add_argument('left', metavar='DIR1', type=Path)
 parser.add_argument('right', metavar='DIR2', type=Path)
 
 def file_type(path:Path):
-	path = Path(path)
-	stat = path.stat()
-	if path.is_symlink():
-		if not path.exists(): return FileType.Orphan
-		return FileType.Symlink
-	if not path.exists(): return FileType.Missing
-	if path.is_dir():
-		sticky = stat.st_mode & 0o01000
-		write = stat.st_mode & 0o00002
+	try: mode = path.stat().st_mode
+	except FileNotFoundError:
+		if stat.S_ISLNK(mode): return FileType.Orphan
+		return FileType.Missing
+	if stat.S_ISLNK(mode): return FileType.Symlink
+	if stat.S_ISDIR(mode):
+		sticky = mode & stat.S_ISVTX
+		write = mode & stat.S_IWOTH
 		if sticky and write: return FileType.StickyWrite
 		if write: return FileType.OtherWrite
 		if sticky: return FileType.Sticky
 		return FileType.Directory
-	if path.is_mount(): return FileType.Door
-	if path.is_block_device(): return FileType.BlockDevice
-	if path.is_char_device(): return FileType.CharDevice
-	if path.is_fifo(): return FileType.NamedPipe
-	if path.is_socket(): return FileType.Socket
-	if not path.is_file(): return FileType.Orphan
-	if stat.st_mode & 0o04000: return FileType.Setuid
-	if stat.st_mode & 0o02000: return FileType.Setgid
-	if stat.st_mode & 0o00111: return FileType.Executable
+	if stat.S_ISDOOR(mode): return FileType.Door
+	if stat.S_ISBLK(mode): return FileType.BlockDevice
+	if stat.S_ISCHR(mode): return FileType.CharDevice
+	if stat.S_ISFIFO(mode): return FileType.NamedPipe
+	if stat.S_ISSOCK(mode): return FileType.Socket
+	if not stat.S_ISREG(mode): return FileType.Unknown
+	if mode & stat.S_ISUID: return FileType.Setuid
+	if mode & stat.S_ISGID: return FileType.Setgid
+	executable = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+	if mode & executable: return FileType.Executable
 	return FileType.File
 
 class DirDiffEntry(ListItem):
@@ -206,18 +207,18 @@ class DirDiffApp(App):
 		for index, name in enumerate(sortedfiles):
 			if self.conf.exclude.search(name) is not None: continue
 			l, r = left.joinpath(name) in lefts, right.joinpath(name) in rights
-			if l and r: entry = entries[name] = DirDiffEntry(name)
+			if l and r: entry = entries[name] = DirDiffEntry(name,
+				left=file_type(left / name), right=file_type(right / name))
 			elif l: entry = DirDiffEntry(name, status=Status.LeftOnly,
-				left=file_type(left.joinpath(name)), right=FileType.Missing)
+				left=file_type(left / name), right=FileType.Missing)
 			else: entry = DirDiffEntry(name, status=Status.RightOnly,
-				left=FileType.Missing, right=file_type(right.joinpath(name)))
+				left=FileType.Missing, right=file_type(right / name))
 			append = files.append(entry)
 			if index % 4 == 0: await append
 		await asyncio.sleep(0)
 		files.index = self.index_cache.get(self.cwd, 0)
 		for name, entry in entries.items():
-			entry.status, entry.left, entry.right = \
-				diff_file(left / name, right / name, self.conf.exclude)
+			entry.status = diff_file(left / name, right / name, self.conf.exclude)
 			await asyncio.sleep(0)
 	def action_select(self):
 		self.query_one('#files').action_select_cursor()
@@ -239,7 +240,7 @@ class DirDiffApp(App):
 		if self.cwd == Path('.'): return
 		self.cwd = self.cwd.parent
 	def action_refresh(self):
-		self.watch_cwd(self.cwd, self.cwd)
+		self.cwd = self.cwd
 	def action_shell(self, index):
 		path = [self.conf.left, self.conf.right][index] / self.cwd
 		with self.suspend():
@@ -256,32 +257,30 @@ def diff_dir(left, right, exclude):
 	status = Status.Matching
 	for l, r in zip(lefts, rights):
 		entry = diff_file(l, r, exclude)
-		if entry[0] == Status.Matching: continue
-		if entry[0] == Status.Unknown:
+		if entry == Status.Matching: continue
+		if entry == Status.Unknown:
 			status = Status.Unknown ; continue
 		return Status.Different
 	return status
 
 def diff_file(left, right, exclude):
 	lstat, rstat = left.stat(), right.stat()
-	ltype, rtype = file_type(left), file_type(right)
 	if lstat.st_dev == rstat.st_dev and lstat.st_ino == rstat.st_ino:
-		return (Status.Matching, ltype, rtype)
-	if left.is_symlink():
-		status, left, right = diff_file(left.resolve(), right, exclude)
-		return (status, ltype, right)
-	if right.is_symlink():
-		status, left, right = diff_file(left, right.resolve(), exclude)
-		return (status, left, rtype)
-	if left.is_dir() and right.is_dir():
-		return diff_dir(left, right, exclude), ltype, rtype
-	if left.is_file() and right.is_file():
+		return Status.Matching
+	lmode, rmode = lstat.st_mode, rstat.st_mode
+	if stat.S_ISLNK(lmode):
+		return diff_file(left.resolve(), right, exclude)
+	if stat.S_ISLNK(rmode):
+		return diff_file(left, right.resolve(), exclude)
+	if stat.S_ISDIR(lmode) and stat.S_ISDIR(rmode):
+		return diff_dir(left, right, exclude)
+	if stat.S_ISREG(lmode) and stat.S_ISREG(rmode):
 		if filecmp.cmp(left, right):
-			return (Status.Matching, ltype, rtype)
-		return (Status.Different, ltype, rtype)
+			return Status.Matching
+		return Status.Different
 	if ltype != rtype:
-		return (Status.Different, ltype, rtype)
-	return (Status.Unknown, ltype, rtype)
+		return Status.Different
+	return Status.Unknown
 
 def ansi_style(nums):
 	style, fg, bg = {}, None, None
