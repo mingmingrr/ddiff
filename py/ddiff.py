@@ -296,8 +296,8 @@ def ansi_style(nums):
 		elif n in [38, 48, 58]:
 			m, r = nums.pop(), nums.pop()
 			assert m in [2, 5], 'unknown color: {}'.format(n)
-			if m == 2: ansi_colors[r] if r < 16 else RichColor.from_ansi(r)
-			elif m == 5: c = RichColor(r, nums.pop(), nums.pop())
+			if m == 5: c = ansi_colors[r] if r < 16 else RichColor.from_ansi(r)
+			elif m == 2: c = RichColor(r, nums.pop(), nums.pop())
 			fg, bg = c if n == 38 else fg, c if n == 48 else bg
 	return style, fg, bg
 
@@ -337,6 +337,7 @@ def main():
 		os.environ.get('LS_COLORS', '').split(':') if x)
 	styles = [DirDiffApp.CSS]
 	for k, v in colors.items():
+		if k.startswith('*'): continue
 		css = next(parse.parse('DiffEntry .type-{} {{}}'.format(k),
 			'<generated: {}>'.format(__file__)))
 		style, fg, bg = ansi_style(v)
