@@ -7,6 +7,7 @@ from textual.widgets import *
 from textual.containers import *
 from textual.reactive import *
 from textual.binding import *
+from textual.screen import *
 from textual.color import *
 from textual.css.styles import *
 import textual.css.parse as parse
@@ -104,15 +105,62 @@ def file_type(path:Path):
 	if mode & executable: return FileType.Executable
 	return FileType.File
 
+class BindingDesc(Binding):
+	def __init__(self, *args, long_description=None, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.long_description = long_description
+
+class MenuScreen(ModalScreen):
+	BINDINGS = [
+		BindingDesc('?,escape', 'exit_menu', 'exit menu', key_display='?'),
+	]
+	DEFAULT_CSS = '''
+		MenuScreen {
+			align: center middle;
+			background: $background 50%;
+		}
+		MenuScreen > Widget {
+			border: solid;
+			min-width: 40; min-height: 4;
+			max-width: 100%; max-height: 100%;
+			width: 50%; height: 50%;
+		}
+		MenuScreen .key { margin-right: 2; }
+	'''
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.bindings = {(
+			getattr(binding, 'key_display', None) or binding.key,
+			getattr(binding, 'long_description', None) or binding.description)
+			for binding in self.app.BINDINGS}
+	def compose(self):
+		with ListView() as container:
+			container.border_title = 'Menu'
+			for binding in DirDiffApp.BINDINGS:
+				key = binding.key_display or binding.key
+				desc = binding.long_description or binding.description
+				with ListItem() as item:
+					yield Horizontal(
+						Label(key, classes='key'),
+						Label(desc, classes='desc'))
+					item.binding = binding
+			container.focus()
+	async def on_list_view_selected(self, message):
+		self.app.pop_screen()
+		key = message.item.binding.key.split(',', maxsplit=1)[0]
+		await self.app.check_bindings(key, True) \
+			or await self.app.check_bindings(key, False)
+		message.stop()
+	def action_exit_menu(self):
+		self.app.pop_screen()
+
 class DiffEntry(ListItem):
 	DEFAULT_CSS = '''
-		ListView       > DiffEntry.--highlight { background: $accent 33%; }
-		ListView:focus > DiffEntry.--highlight { background: $accent 33%; }
-		DiffEntry { background: $background 0%; }
-		DiffEntry .icon { width: 1; margin-right: 1; text-style: bold; color: black; }
-		DiffEntry .type { color: $text-muted; margin-right: 1; }
+		DiffEntry .icon, DiffEntry .type { margin-right: 1; }
+		DiffEntry .icon { width: 1; text-style: bold; color: black; }
+		DiffEntry .type { color: $text-muted; }
 		DiffEntry .side { width: 1fr; }
-		DiffEntry .left { border-right: solid $primary; }
+		DiffEntry .left { margin-right: 1; }
 		DiffEntry.different .icon { background: $warning; }
 		DiffEntry.unknown   .icon { background: $primary-background; }
 		DiffEntry.leftonly  .right .icon { background: $error; }
@@ -160,23 +208,45 @@ class DiffEntry(ListItem):
 		right = self.query_one('.right')
 		left.query_one('.icon').update(new.value[0])
 		right.query_one('.icon').update(new.value[1])
+	def on_click(self, message):
+		view = self.parent
+		index = view._nodes.index(self)
+		if index == view.index: return
+		view.focus()
+		view.index = index
+		message.prevent_default()
 
 class DirDiffApp(App):
 	TITLE = 'DirDiff'
 	BINDINGS = [
-		Binding('q', 'quit', 'quit'),
-		Binding('e,right', 'select', 'select', priority=True, key_display='▶'),
-		Binding('escape,left', 'leave', 'leave', priority=True, key_display='◀'),
-		Binding('r', 'refresh', 'refresh'),
-		Binding('s', 'shell("left")', 'shell-left', key_display='s'),
-		Binding('S', 'shell("right")', 'shell-right', key_display='S'),
+		BindingDesc('q', 'quit()', 'quit',
+			long_description='quit the app'),
+		BindingDesc('right', 'select()', 'select',
+			key_display='▶', show=False,
+			long_description='enter directory / open files in editor'),
+		BindingDesc('left', 'leave()', 'leave',
+			key_display='◀', show=True,
+			long_description='leave the current directory'),
+		BindingDesc('r', 'refresh()', 'refresh', show=False,
+			long_description='refresh files and diffs'),
+		BindingDesc('s', 'shell("left")', 'shell-left',
+			key_display='s', show=False,
+			long_description='open shell in the left directory'),
+		BindingDesc('S', 'shell("right")', 'shell-right',
+			key_display='S', show=False,
+			long_description='open shell in the right directory'),
+		BindingDesc('?', 'menu()', 'menu', key_display='?',
+			long_description='toggle this menu'),
 	]
 	CSS = '''
 		$background: #000;
 		#paths { height: 1; overflow-y: scroll; }
 		#paths Label { width: 1fr }
-		#paths .left { border-right: solid $primary; }
+		#paths .left { margin-right: 1; }
 		#files { background: $background; height: 1fr; overflow-y: scroll; }
+		ListItem { background: #0000; }
+		ListItem.--highlight { background: $accent 20%; }
+		ListView:focus > ListItem.--highlight { background: $accent 33%; }
 	'''
 	cwd = reactive(Path('.'), always_update=True)
 	def __init__(self, *args, config=None, **kwargs):
@@ -246,6 +316,8 @@ class DirDiffApp(App):
 		with self.suspend():
 			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+	def action_menu(self):
+		self.push_screen(MenuScreen())
 
 def diff_dir(left, right, exclude):
 	lefts = [i for i in left.iterdir() if exclude.match(i.name) is None]
