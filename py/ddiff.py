@@ -27,6 +27,7 @@ import filecmp
 import natsort
 import asyncio
 import itertools
+import shutil
 from pathlib import Path
 
 # import rich.traceback
@@ -112,19 +113,9 @@ class BindingDesc(Binding):
 
 class MenuScreen(ModalScreen):
 	BINDINGS = [
-		BindingDesc('?,escape', 'exit_menu', 'exit menu', key_display='?'),
+		BindingDesc('?,escape', 'pop_screen', 'exit menu', key_display='?'),
 	]
 	DEFAULT_CSS = '''
-		MenuScreen {
-			align: center middle;
-			background: $background 50%;
-		}
-		MenuScreen > Widget {
-			border: solid;
-			min-width: 40; min-height: 4;
-			max-width: 100%; max-height: 100%;
-			width: 50%; height: 50%;
-		}
 		MenuScreen .key { margin-right: 2; }
 	'''
 	def __init__(self, *args, **kwargs):
@@ -151,8 +142,57 @@ class MenuScreen(ModalScreen):
 		await self.app.check_bindings(key, True) \
 			or await self.app.check_bindings(key, False)
 		message.stop()
-	def action_exit_menu(self):
+
+class ConfirmScreen(ModalScreen):
+	BINDINGS = [
+		BindingDesc('escape', 'exit_menu', 'exit menu', key_display='Esc'),
+		BindingDesc('left', 'focus_previous', 'focus previous', show=False),
+		BindingDesc('right', 'focus_next', 'focus next', show=False),
+	]
+	DEFAULT_CSS = '''
+		ConfirmScreen Grid {
+			grid-size: 2;
+			grid-rows: 1fr 3;
+		}
+		ConfirmScreen .message {
+			column-span: 2;
+			height: 100%;
+			width: 100%;
+			content-align: center middle;
+		}
+		ConfirmScreen Button { width: 100%; }
+		ConfirmScreen .confirm { background: $primary; }
+		ConfirmScreen .cancel { background: $secondary; }
+	'''
+	def __init__(self, title, message, *args,
+			confirm='Ok', cancel='Cancel', default=False, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.done = asyncio.Event()
+		self.title = title
+		self.message = message
+		self.confirm = confirm
+		self.cancel = cancel
+		self.default = default
+		self.result = default
+	def compose(self):
+		with Grid() as grid:
+			grid.border_title = self.title
+			yield Label(self.message, classes='message')
+			left, right = (
+				Button(self.cancel, classes='cancel'),
+				Button(self.confirm, classes='confirm'))
+			left.result, right.result = False, True
+			if self.default: left, right = right, left
+			yield left; yield right
+			left.focus()
+	def finish(self, result):
+		self.result = result
 		self.app.pop_screen()
+		self.done.set()
+	def on_button_pressed(self, message):
+		self.finish(message.button.result)
+	def action_exit_menu(self):
+		self.finish(False)
 
 class DiffEntry(ListItem):
 	DEFAULT_CSS = '''
@@ -235,6 +275,18 @@ class DirDiffApp(App):
 		BindingDesc('S', 'shell("right")', 'shell-right',
 			key_display='S', show=False,
 			long_description='open shell in the right directory'),
+		BindingDesc('c', 'copy("right","left")', 'copy-left',
+			key_display='c', show=False,
+			long_description='copy right to left side'),
+		BindingDesc('C', 'copy("left","right")', 'copy-right',
+			key_display='C', show=False,
+			long_description='copy left to right side'),
+		BindingDesc('d', 'delete("left")', 'delete-left',
+			key_display='d', show=False,
+			long_description='delete the left file'),
+		BindingDesc('D', 'delete("right")', 'delete-right',
+			key_display='D', show=False,
+			long_description='delete the right file'),
 		BindingDesc('?', 'menu()', 'menu', key_display='?',
 			long_description='toggle this menu'),
 	]
@@ -247,6 +299,12 @@ class DirDiffApp(App):
 		ListItem { background: #0000; }
 		ListItem.--highlight { background: $accent 20%; }
 		ListView:focus > ListItem.--highlight { background: $accent 33%; }
+		ModalScreen { align: center middle; background: $background 50%; }
+		ModalScreen > Widget {
+			border: solid;
+			min-width: 40; width: 50%; min-height: 4;
+			max-width: 100%; height: 50%; max-height: 100%;
+		}
 	'''
 	cwd = reactive(Path('.'), always_update=True)
 	def __init__(self, *args, config=None, **kwargs):
@@ -318,6 +376,36 @@ class DirDiffApp(App):
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 	def action_menu(self):
 		self.push_screen(MenuScreen())
+	def action_copy(self, source, target):
+		name = self.query_one('#files').highlighted_child.name
+		source = self.cwd / getattr(self.conf, source) / name
+		target = self.cwd / getattr(self.conf, target) / name
+		if not target.exists():
+			shutil.copy(source, target)
+			self.action_refresh()
+			return
+		screen = ConfirmScreen('Copy',
+			'Overwrite {} with {}'.format(target, source))
+		self.push_screen(screen)
+		async def task():
+			await screen.done.wait()
+			if not screen.result: return
+			shutil.copy(source, target)
+			self.action_refresh()
+		asyncio.create_task(task())
+	def action_delete(self, side):
+		name = self.query_one('#files').highlighted_child.name
+		path = self.cwd / getattr(self.conf, side) / name
+		if not path.exists(): return
+		screen = ConfirmScreen('Delete', 'Delete {}'.format(path))
+		self.push_screen(screen)
+		async def task():
+			await screen.done.wait()
+			if not screen.result: return
+			if path.is_dir(): shutil.rmtree(path)
+			else: path.unlink()
+			self.action_refresh()
+		asyncio.create_task(task())
 
 def diff_dir(left, right, exclude):
 	lefts = [i for i in left.iterdir() if exclude.match(i.name) is None]
