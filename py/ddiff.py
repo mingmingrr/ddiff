@@ -143,6 +143,35 @@ class MenuScreen(ModalScreen):
 			or await self.app.check_bindings(key, False)
 		message.stop()
 
+class MessageScreen(ModalScreen):
+	BINDINGS = [
+		BindingDesc('escape', 'exit_menu', 'exit menu', key_display='Esc'),
+	]
+	DEFAULT_CSS = '''
+		MessageScreen Widget { width: 100%; }
+		MessageScreen .message { height: 1fr; content-align: center middle; }
+		MessageScreen Button { background: $primary; }
+	'''
+	def __init__(self, title, message, *args, confirm='Ok', **kwargs):
+		super().__init__(*args, **kwargs)
+		self.done = asyncio.Event()
+		self.title = title
+		self.message = message
+		self.confirm = confirm
+	def compose(self):
+		with Vertical() as container:
+			container.border_title = self.title
+			yield Label(self.message, classes='message')
+			with Button(self.confirm) as button:
+				button.focus()
+	def finish(self):
+		self.app.pop_screen()
+		self.done.set()
+	def on_button_pressed(self, message):
+		self.finish()
+	def action_exit_menu(self):
+		self.finish(False)
+
 class ConfirmScreen(ModalScreen):
 	BINDINGS = [
 		BindingDesc('escape', 'exit_menu', 'exit menu', key_display='Esc'),
@@ -380,19 +409,27 @@ class DirDiffApp(App):
 		name = self.query_one('#files').highlighted_child.name
 		source = self.cwd / getattr(self.conf, source) / name
 		target = self.cwd / getattr(self.conf, target) / name
+		if not source.exists(): return
 		if not target.exists():
-			shutil.copy(source, target)
-			self.action_refresh()
-			return
+			return self.do_copy(source, target)
 		screen = ConfirmScreen('Copy',
 			'Overwrite {} with {}'.format(target, source))
 		self.push_screen(screen)
 		async def task():
 			await screen.done.wait()
 			if not screen.result: return
-			shutil.copy(source, target)
-			self.action_refresh()
+			self.do_copy(source, target)
 		asyncio.create_task(task())
+	def do_copy(self, source, target):
+		try:
+			if source.is_dir():
+				shutil.copytree(source, target)
+			else:
+				shutil.copy2(source, target)
+		except Exception as exc:
+			self.push_screen(MessageScreen('Copy', str(exc)))
+		else:
+			self.action_refresh()
 	def action_delete(self, side):
 		name = self.query_one('#files').highlighted_child.name
 		path = self.cwd / getattr(self.conf, side) / name
