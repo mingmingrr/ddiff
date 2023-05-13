@@ -400,8 +400,12 @@ class DirDiffApp(App):
 		self.cwd = self.cwd
 	def action_shell(self, side):
 		path = getattr(self.conf, side) / self.cwd
+		env = os.environ.copy()
+		env['DDIFF_LEFT'] = str(self.conf.left.joinpath(self.cwd).resolve())
+		env['DDIFF_RIGHT'] = str(self.conf.right.joinpath(self.cwd).resolve())
 		with self.suspend():
-			subprocess.run(os.environ.get('SHELL', 'sh'), shell=True, cwd=path,
+			subprocess.run(os.environ.get('SHELL', 'sh'),
+				shell=True, cwd=path, env=env,
 				stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 	def action_menu(self):
 		self.push_screen(MenuScreen())
