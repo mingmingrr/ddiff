@@ -411,9 +411,11 @@ class DirDiffApp(App):
 		self.push_screen(MenuScreen())
 	def action_copy(self, source, target):
 		name = self.query_one('#files').highlighted_child.name
-		source = self.cwd / getattr(self.conf, source) / name
-		target = self.cwd / getattr(self.conf, target) / name
-		if not source.exists(): return
+		source = getattr(self.conf, source) / self.cwd / name
+		target = getattr(self.conf, target) / self.cwd / name
+		if not source.exists():
+			return self.push_screen(MessageScreen('Copy',
+				'Source does not exist: {}'.format(source)))
 		if not target.exists():
 			return self.do_copy(source, target)
 		screen = ConfirmScreen('Copy',
@@ -436,7 +438,7 @@ class DirDiffApp(App):
 			self.action_refresh()
 	def action_delete(self, side):
 		name = self.query_one('#files').highlighted_child.name
-		path = self.cwd / getattr(self.conf, side) / name
+		path = getattr(self.conf, side) / self.cwd / name
 		if not path.exists(): return
 		screen = ConfirmScreen('Delete', 'Delete {}'.format(path))
 		self.push_screen(screen)
