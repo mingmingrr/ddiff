@@ -1,7 +1,8 @@
 #include "filetype.hpp"
 
-#include <filesystem>
-#include <mutex>
+#include <fstream>
+#include <sys/stat.h>
+#include <boost/functional/hash.hpp>
 
 namespace fs = std::filesystem;
 
@@ -31,6 +32,7 @@ std::ostream& operator <<(std::ostream& output, const enum file_extra& type) {
 		case file_extra::setuid:       output << "setuid";       break;
 		case file_extra::setgid:       output << "setgid";       break;
 		case file_extra::executable:   output << "executable";   break;
+		case file_extra::multi_link:   output << "multi_link";   break;
 	}
 	return output;
 }
@@ -40,6 +42,7 @@ std::map<std::string, file_type> file_type_names =
 	, { "su", { fs::file_type::regular   , file_extra::setuid       } }
 	, { "sg", { fs::file_type::regular   , file_extra::setgid       } }
 	, { "ex", { fs::file_type::regular   , file_extra::executable   } }
+	, { "mh", { fs::file_type::regular   , file_extra::multi_link   } }
 	, { "ln", { fs::file_type::symlink   , file_extra::normal       } }
 	, { "or", { fs::file_type::symlink   , file_extra::orphan       } }
 	, { "di", { fs::file_type::directory , file_extra::normal       } }
@@ -54,7 +57,6 @@ std::map<std::string, file_type> file_type_names =
 	, { "mi", { fs::file_type::not_found , file_extra::normal       } }
 	// do solaris door
 	// ca file with capabilities
-	// mh multi hardlink
 	};
 
 fs::path resolve_symlink(const fs::path& path) {
@@ -99,5 +101,77 @@ file_type file_type_of(const fs::path& path) {
 		default: break;
 	}
 	return {type, extra};
+}
+
+file_info get_file_info(const fs::path& path) {
+	struct stat fstat;
+	if(lstat(path.c_str(), &fstat))
+		throw std::system_error();
+	file_info info =
+		{ .fpath = path
+		, .mtime = fstat.st_mtim
+		, .extra = file_extra::normal
+		, .fsize = fstat.st_size
+		, .hash_init = [=]() {
+			std::ifstream file(path, std::ios::in | std::ios::binary);
+			char buffer[4096];
+			file.read(buffer, 4096);
+			return boost::hash_range(buffer, buffer + file.gcount());
+			}
+		, .hash_whole = [=]() {
+			std::ifstream file(path, std::ios::in | std::ios::binary);
+			char buffer[4096];
+			size_t hash = 0;
+			while(!file.eof()) {
+				file.read(buffer, 4096);
+				boost::hash_combine(hash,
+					boost::hash_range(buffer, buffer + file.gcount()));
+			}
+			return hash;
+			}
+		};
+	switch(fstat.st_mode & S_IFMT) {
+		case S_IFREG: {
+			info.ftype = fs::file_type::regular;
+			if(fstat.st_mode & S_ISUID)
+				info.extra = file_extra::setuid;
+			else if(fstat.st_mode & S_ISGID)
+				info.extra = file_extra::setgid;
+			else if(fstat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+				info.extra = file_extra::executable;
+			else if(fstat.st_nlink > 1)
+				info.extra = file_extra::multi_link;
+		} break;
+		case S_IFDIR: {
+			info.ftype = fs::file_type::directory;
+			if((fstat.st_mode & (S_ISVTX | S_IWOTH)) == (S_ISVTX | S_IWOTH))
+				info.extra = file_extra::sticky_write;
+			else if(fstat.st_mode & S_ISVTX)
+				info.extra = file_extra::sticky;
+			else if(fstat.st_mode & S_IWOTH)
+				info.extra = file_extra::write;
+		} break;
+		case S_IFLNK:
+			info.ftype = fs::file_type::symlink;
+			if(!fs::exists(resolve_symlink(path)))
+				info.extra = file_extra::orphan;
+			break;
+		case S_IFBLK:
+			info.ftype = fs::file_type::block;
+			break;
+		case S_IFCHR:
+			info.ftype = fs::file_type::character;
+			break;
+		case S_IFIFO:
+			info.ftype = fs::file_type::fifo;
+			break;
+		case S_IFSOCK:
+			info.ftype = fs::file_type::socket;
+			break;
+		default:
+			info.ftype = fs::file_type::unknown;
+			break;
+	}
+	return info;
 }
 

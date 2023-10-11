@@ -1,16 +1,16 @@
 #pragma once
 
-#include <ftxui/component/event.hpp>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <ftxui/component/event.hpp>
 
 std::ostream& operator <<(
 	std::ostream& out,
 	ftxui::Event event
 );
 
-struct time { };
+struct time {};
 extern struct time now;
 
 std::ostream& operator <<(
@@ -36,7 +36,9 @@ void tracef(std::ostream& out, X&& x, Xs&& ...xs) {
 }
 
 template<typename T>
-decltype(auto) identity(T&& t) { return std::forward<T>(t); }
+decltype(auto) identity(T&& t) {
+	return std::forward<T>(t);
+}
 
 template<typename ...Xs>
 decltype(auto) trace(Xs&& ...xs) {

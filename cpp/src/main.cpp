@@ -1,13 +1,13 @@
+#include "lazy.hpp"
 #include "filetype.hpp"
 #include "trace.hpp"
 #include "natkey.hpp"
 #include "opts.hpp"
+#include "memoize.hpp"
 
 #include <bits/stdc++.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#include "memoize.hpp"
 
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string.hpp>
@@ -33,8 +33,7 @@ namespace asio = boost::asio;
 
 std::string shell_quote(const std::string& str) {
 	if(str.size() == 0) return "''";
-	static const std::regex unsafe("[^\\w@%+=:,./-]");
-	if(!std::regex_search(str, unsafe)) return str;
+	if(!std::regex_search(str, std::regex("[^\\w@%+=:,./-]"))) return str;
 	return "'" + std::regex_replace(str, std::regex("'"), "'\"'\"'") + "'";
 }
 
@@ -91,6 +90,11 @@ struct file_entry {
 	file_type right;
 };
 
+enum struct app_side {
+	left,
+	right,
+};
+
 struct app_state {
 	const app_options opts;
 	ftxui::ScreenInteractive screen;
@@ -100,6 +104,9 @@ struct app_state {
 	int index;
 	struct {
 		bool help;
+		bool confirm;
+		std::string confirm_message;
+		std::function<void()> confirm_continuation;
 	} modal ;
 	asio::thread_pool pool;
 };
@@ -179,24 +186,35 @@ void action_leave(app_state& st) {
 	change_directory(st);
 }
 
-void action_refresh(app_state& st) {
-	change_directory(st);
+std::function<void(app_state&)> action_refresh(bool reset) {
+	return [reset](app_state& st) {
+		change_directory(st);
+	};
 }
 
-void action_reset(app_state& st) {
-	change_directory(st);
+std::function<void(app_state&)> action_copy(app_side side) {
+	return [side](app_state& st) {
+		trace(now, "event: copy", side == app_side::left ? "left" : "right");
+	};
 }
 
-std::function<void(app_state&)> action_shell(bool right) {
-	return [right](app_state& st) {
+std::function<void(app_state&)> action_delete(app_side side) {
+	return [side](app_state& st) {
+		trace(now, "event: delete", side == app_side::left ? "left" : "right");
+	};
+}
+
+std::function<void(app_state&)> action_shell(app_side side) {
+	return [side](app_state& st) {
 		const char* shell = std::getenv("SHELL");
 		if(shell == NULL) shell = "sh";
-		std::string cwd = (right ? st.opts.right : st.opts.left) / st.cwd;
+		std::string cwd = (side == app_side::left
+			? st.opts.left : st.opts.right) / st.cwd;
 		st.screen.WithRestoredIO([&]() {
 			proc::system(proc::search_path(shell),
 				proc::std_out > stdout, proc::std_err > stderr, proc::std_in < stdin,
-				proc::env["DDIFF_LEFT"] = (st.opts.left / st.cwd),
-				proc::env["DDIFF_RIGHT"] = (st.opts.right / st.cwd),
+				proc::env["DDIFF_LEFT"] = fs::absolute(st.opts.left / st.cwd),
+				proc::env["DDIFF_RIGHT"] = fs::absolute(st.opts.right / st.cwd),
 				proc::start_dir(cwd));
 		})();
 	};
@@ -210,26 +228,30 @@ struct button_def {
 };
 
 std::vector<std::pair<std::string, button_def>> button_defs =
-	{ { "?", { "?", "close", "close this window", [](app_state& st) { st.modal.help ^= true; } } }
-	, { "q", { "q", "quit", "quit the app", [](app_state& st) { st.screen.Exit(); } } }
-	, { "\x1b[C", { "▶", "enter", "enter directory / open files in editor", action_enter } }
-	, { "\x1b[D", { "◀", "leave", "leave the current directory", action_leave } }
-	, { "r", { "r", "refresh", "refresh files and diffs", action_refresh } }
-	, { "R", { "W", "reset", "reset diff cache", action_reset } }
-	, { "s", { "s", "shell L", "open shell in the left directory", action_shell(false) } }
-	, { "S", { "S", "shell R", "open shell in the right directory", action_shell(true) } }
-	// , { "c", { "c", "copy L", "copy right to left side", [](app_state& st) {
-		// trace(now, "event: copy L");
-		// } } }
-	// , { "C", { "C", "copy R", "copy left to right side", [](app_state& st) {
-		// trace(now, "event: copy R");
-		// } } }
-	// , { "d", { "d", "delete L", "delete the left file", [](app_state& st) {
-		// trace(now, "event: delete L");
-		// } } }
-	// , { "D", { "D", "delete R", "delete the right file", [](app_state& st) {
-		// trace(now, "event: delete R");
-		// } } }
+	{ { "?", { "?", "close", "close this window",
+		[](app_state& st) { st.modal.help ^= true; } } }
+	, { "q", { "q", "quit", "quit the app",
+		[](app_state& st) { st.screen.Exit(); } } }
+	, { "\x1b[C", { "▶", "enter", "enter directory / open files in editor",
+		action_enter } }
+	, { "\x1b[D", { "◀", "leave", "leave the current directory",
+		action_leave } }
+	, { "r", { "r", "refresh", "refresh files and diffs",
+		action_refresh(false) } }
+	, { "R", { "W", "reset", "reset diff cache",
+		action_refresh(true) } }
+	, { "s", { "s", "shell L", "open shell in the left directory",
+		action_shell(app_side::left) } }
+	, { "S", { "S", "shell R", "open shell in the right directory",
+		action_shell(app_side::right) } }
+	, { "c", { "c", "copy L", "copy right to left side",
+		action_copy(app_side::left) } }
+	, { "C", { "C", "copy R", "copy left to right side",
+		action_copy(app_side::right) } }
+	, { "d", { "d", "delete L", "delete the left file",
+		action_delete(app_side::left) } }
+	, { "D", { "D", "delete R", "delete the right file",
+		action_delete(app_side::right) } }
 	};
 
 std::map<std::string, button_def> button_map =
@@ -329,15 +351,14 @@ int main(int argc, const char* argv[]) {
 		return elem;
 	};
 	menuopt.on_change = [&]() { trace(now, "on_change"); };
-	menuopt.on_enter = [&]() { trace(now, "on_enter"); };
+	menuopt.on_enter = [&]() { action_enter(st); };
 	auto menu_component = ftxui::Menu(&st.indexes, &st.index, menuopt);
 
 	change_directory(st);
 
 	ftxui::Components buttons =
-		{ ftxui::Button("q Quit", st.screen.ExitLoopClosure(), button_simple())
-		, ftxui::Button("? Help", [&]() { st.modal.help ^= true; }, button_simple())
-		, ftxui::Button("* cd", [&]() { action_enter(st); }, button_simple())
+		{ ftxui::Button("q Quit", [&]() { button_map["q"].func(st); }, button_simple())
+		, ftxui::Button("? Help", [&]() { button_map["?"].func(st); }, button_simple())
 		};
 	auto footer_component = ftxui::Renderer(
 		ftxui::Container::Horizontal(buttons), [&]() {
@@ -406,7 +427,7 @@ int main(int argc, const char* argv[]) {
 		&st.modal.help);
 
 	st.screen.Loop(main_layout | help_modal
-		| with_buttons(&st, { "?", "q", "r", "s", "S" })
+		| with_buttons(&st, { "?", "q", "r", "R", "s", "S", "c", "C", "d", "D" })
 		// | ftxui::CatchEvent([&](ftxui::Event event) {
 			// trace(now, event, json::serialize(event.input()));
 			// return false;
