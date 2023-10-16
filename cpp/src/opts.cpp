@@ -28,12 +28,13 @@ ftxui::Decorator parse_ls_color(const std::string& lscolor) {
 	boost::split(numberstrs, lscolor, boost::is_any_of(";"));
 	std::vector<int> numbers;
 	std::transform(numberstrs.begin(), numberstrs.end(),
-		std::back_inserter(numbers), [](const auto& x) { return std::stoi(x); });
+		std::back_inserter(numbers), [] (const auto& x) { return std::stoi(x); });
 	ftxui::Decorator style = ftxui::nothing;
 	for(size_t i = 0; i < numbers.size(); ++i) {
 		auto n = numbers[i];
-		if(ansi_styles.contains(n))
-			style = style | ansi_styles.at(n);
+		auto f = ansi_styles.find(n);
+		if(f != ansi_styles.end())
+			style = style | f->second;
 		else if(30 <= n && n <= 37)
 			style = style | ftxui::color(
 				ftxui::Color(ftxui::Color::Palette16(n - 30)));
@@ -81,6 +82,9 @@ std::variant<int,app_options> get_opts(int argc, const char* argv[]) {
 		( "editor,e"
 		, opt::value<std::string>()->default_value("$EDITOR -d")
 		, "program used to diff two files" )
+		( "threads,j"
+		, opt::value<unsigned>()->default_value(4)
+		, "number of diff threads" )
 		( "exclude,x"
 		, opt::value<std::vector<std::string>>()->composing()
 		, "ignore files matching regex" )
@@ -104,17 +108,21 @@ std::variant<int,app_options> get_opts(int argc, const char* argv[]) {
 		std::cout << err.what() << '\n' << opts_desc << std::flush;
 		return 1;
 	}
-	if(args.contains("help")) {
+	auto help = args.find("help");
+	if(help != args.end()) {
 		std::cout << opts_desc << std::flush;
 		return 0;
 	}
 
-	app_options opts;
-	opts.left = args["left"].as<std::string>();
-	opts.right = args["right"].as<std::string>();
-	opts.editor = args["editor"].as<std::string>();
-	if(args.contains("exclude"))
-		for(const auto exc : args["exclude"].as<std::vector<std::string>>())
+	app_options opts
+		{ .left = args["left"].as<std::string>()
+		, .right = args["right"].as<std::string>()
+		, .editor = args["editor"].as<std::string>()
+		, .threads = args["threads"].as<unsigned>()
+		};
+	auto exclude = args.find("exclude");
+	if(exclude != args.end())
+		for(const auto exc : exclude->second.as<std::vector<std::string>>())
 			opts.excludes.push_back(std::regex(exc));
 	opts.ft_styles = {{file_type_names.at("fi"), ftxui::nothing}};
 
@@ -132,7 +140,8 @@ std::variant<int,app_options> get_opts(int argc, const char* argv[]) {
 		std::string key = color.substr(0, equals);
 		std::string value = color.substr(equals + 1);
 		if(key.empty() || value.empty()) continue;
-		if((key.at(0) != '*') && !file_type_names.contains(key)) continue;
+		auto ft_style = file_type_names.find(key);
+		if((key.at(0) != '*') && (ft_style == file_type_names.end())) continue;
 		ftxui::Decorator style = parse_ls_color(value);
 		if(key.at(0) == '*') {
 			key = key.substr(1);

@@ -1,55 +1,73 @@
 #pragma once
 
+#include <unordered_map>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
 #include <functional>
 #include <memory>
 
-template <class F>
-struct extract_call : extract_call<decltype(&F::operator())> {};
+#include <boost/functional/hash.hpp>
 
-template <class C, class R, class... Args>
-struct extract_call<R (C::*)(Args...) const> {
-	using arg_t = std::tuple<Args...>;
-	using ret_t = R;
+template<typename Tuple, size_t Index = std::tuple_size<Tuple>::value - 1>
+struct HashTuple {
+	static void hash_tuple_impl(size_t& seed, Tuple const& tuple) {
+		HashTuple<Tuple, Index - 1>::apply(seed, tuple);
+		boost::hash_combine(seed, std::get<Index>(tuple));
+	}
 };
 
-template <class C, class R, class... Args>
-struct extract_call<R (C::*)(Args...)> {
-	using arg_t = std::tuple<Args...>;
-	using ret_t = R;
+template<typename Tuple>
+struct HashTuple<Tuple, 0> {
+	static void apply(size_t& seed, Tuple const& tuple) {
+		boost::hash_combine(seed, std::get<0>(tuple));
+	}
 };
 
-template<typename F, typename V>
-auto memoize(F&& fn, V&& valid) {
-	using call_t = extract_call<std::decay_t<F>>;
-	using arg_t = typename call_t::arg_t;
-	using ret_t = typename call_t::ret_t;
-	std::map<arg_t, ret_t> cache;
-	std::shared_ptr<std::shared_mutex> lock(new std::shared_mutex());
-	return [=]<std::size_t ...I>(std::index_sequence<I...>) {
-		return [=](typename std::tuple_element<I, arg_t>::type... args) mutable {
-			arg_t key(args...);
-			bool found = false;
-			ret_t val;
-			{
-				const std::shared_lock<std::shared_mutex> _l(*lock);
-				typename decltype(cache)::const_iterator find = cache.find(key);
-				if(find != cache.end()) {
-					found = true;
-					val = find->second;
-				}
+template<typename ...Ts>
+struct hash_tuple {
+	size_t operator()(std::tuple<Ts...> const& ts) const {
+		size_t seed = 0;
+		HashTuple<std::tuple<Ts...> >::apply(seed, ts);
+		return seed;
+	}
+};
+
+template<typename Val, typename Tok, typename ...Args>
+struct memoized {
+	typedef std::tuple<typename std::remove_reference<Args>::type...> key_type;
+
+	std::function<Tok(Args...)> init
+		= [] (const auto&...) { return Tok(); };
+	std::function<bool(Val&,Tok&,Args...)> valid
+		= [] (const auto&...) { return true; };
+	std::function<Val(Tok&,Args...)> func;
+
+	std::shared_mutex mutex = std::shared_mutex();
+	std::unordered_map<key_type, Val, hash_tuple<Args...>> cache = {};
+
+	Val operator ()(Args... args) {
+		Tok init = this->init(args...);
+		key_type key(args...);
+		bool found = false;
+		Val val;
+		{
+			const std::shared_lock<std::shared_mutex> lock(this->mutex);
+			typename decltype(cache)::const_iterator find = this->cache.find(key);
+			if(find != this->cache.end()) {
+				found = true;
+				val = find->second;
 			}
-			if(found && valid(key, val))
-				return val;
-			val = fn(args...);
-			{
-				const std::unique_lock<std::shared_mutex> _l(*lock);
-				cache[std::move(key)] = std::move(val);
-			}
+		}
+		if(found && valid(val, init, args...))
 			return val;
-		};
-	}(std::make_index_sequence<std::tuple_size_v<arg_t>>{});
-}
+		val = func(init, args...);
+		{
+			const std::unique_lock<std::shared_mutex> lock(this->mutex);
+			this->cache[key] = val;
+		}
+		return val;
+	}
+
+};
 

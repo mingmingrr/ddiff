@@ -1,21 +1,20 @@
 #include "lazy.hpp"
-#include "filetype.hpp"
+#include "fileio.hpp"
 #include "trace.hpp"
 #include "natkey.hpp"
 #include "opts.hpp"
 #include "memoize.hpp"
+#include "diff.hpp"
 
 #include <bits/stdc++.h>
-#include <unistd.h>
-#include <sys/stat.h>
+// #include <unistd.h>
+// #include <sys/stat.h>
 
-#include <boost/program_options.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/process.hpp>
-#include <boost/json.hpp>
 #include <boost/asio.hpp>
+#include <boost/asio/spawn.hpp>
 
-#include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/component/captured_mouse.hpp>
@@ -27,8 +26,6 @@ using namespace std::chrono_literals;
 
 namespace fs = std::filesystem;
 namespace proc = boost::process;
-namespace opt = boost::program_options;
-namespace json = boost::json;
 namespace asio = boost::asio;
 
 std::string shell_quote(const std::string& str) {
@@ -37,57 +34,15 @@ std::string shell_quote(const std::string& str) {
 	return "'" + std::regex_replace(str, std::regex("'"), "'\"'\"'") + "'";
 }
 
-enum struct diff_status {
-	unknown,
-	matching,
-	different,
-	leftonly,
-	rightonly,
-};
-
-typedef std::function<diff_status(
-	const fs::path& left,
-	const fs::path& right
-)> diff_file_func;
-
 bool operator ==(const struct timespec& x, const struct timespec y) {
 	return (x.tv_sec == y.tv_sec) && (x.tv_nsec == y.tv_nsec);
 }
 
-const diff_file_func diff_file = memoize(
-	[](const fs::path& left, const fs::path& right) -> diff_status {
-		const file_type left_type = file_type_of(left);
-		if(left_type.first == fs::file_type::symlink)
-			return diff_file(resolve_symlink(left), right);
-		const file_type right_type = file_type_of(right);
-		if(right_type.first == fs::file_type::symlink)
-			return diff_file(left, resolve_symlink(right));
-		if(left_type != right_type)
-			return diff_status::different;
-		switch(left_type.first) {
-			case fs::file_type::regular: {
-				struct stat left_stat, right_stat;
-				if(stat(left.c_str(), &left_stat))
-					throw std::runtime_error(std::strerror(errno));
-				if(stat(right.c_str(), &right_stat))
-					throw std::runtime_error(std::strerror(errno));
-				if(left_stat.st_size != right_stat.st_size)
-					return diff_status::different;
-				if(left_stat.st_mtim == right_stat.st_mtim)
-					return diff_status::matching;
-				return diff_status::matching;
-			}
-			case fs::file_type::directory:
-				return diff_status::matching;
-			default: return diff_status::unknown;
-		}
-	}, [](auto& x, auto& y) { return true; });
-
 struct file_entry {
 	std::string name;
 	diff_status status;
-	file_type left;
-	file_type right;
+	file_info left;
+	file_info right;
 };
 
 enum struct app_side {
@@ -98,20 +53,23 @@ enum struct app_side {
 struct app_state {
 	const app_options opts;
 	ftxui::ScreenInteractive screen;
-	fs::path cwd;
-	std::vector<file_entry> files;
-	std::vector<std::string> indexes;
-	int index;
+	fs::path cwd = "";
+	std::vector<file_entry> files = {};
+	std::vector<std::string> indexes = {};
+	int index = 0;
 	struct {
-		bool help;
-		bool confirm;
-		std::string confirm_message;
-		std::function<void()> confirm_continuation;
+		bool help = false;
+		bool confirm = false;
+		std::string confirm_message = "";
+		std::function<void(app_state&)> confirm_continuation = [](app_state&){};
 	} modal ;
-	asio::thread_pool pool;
+	mutable asio::thread_pool pool;
 };
 
-void change_directory(app_state& st) {
+void refresh_directory(app_state& st) {
+	// st.pool.stop();
+	// st.pool.wait();
+	// st.pool.join();
 	st.index = 0;
 	st.indexes.clear();
 	st.files.clear();
@@ -122,23 +80,26 @@ void change_directory(app_state& st) {
 		names.push_back(natural_key(file.path().filename()));
 	std::sort(names.begin(), names.end());
 	names.erase(std::unique(names.begin(), names.end()), names.end());
-	trace("--------------------");
+	st.files.reserve(names.size());
 	for(auto [ _, name ] : names) {
-		auto left = file_type_of(st.opts.left / st.cwd / name);
-		auto right = file_type_of(st.opts.right / st.cwd / name);
-		trace(tracemanip, std::setw(40), name, "-",
-			left.first, left.second, "-", right.first, right.second);
-		auto status = diff_status::unknown;
-		if(left == file_type_names.at("mi"))
-			status = diff_status::rightonly;
-		else if(right == file_type_names.at("mi"))
-			status = diff_status::leftonly;
-		st.files.push_back(file_entry{.name = name,
-			.status = status, .left = left, .right = right });
+		auto left = get_file_info(st.opts.left / st.cwd / name);
+		auto right = get_file_info(st.opts.right / st.cwd / name);
+		st.files.push_back(file_entry{
+			.name = name, .status = diff_status::unknown,
+			.left = left, .right = right });
+		if(left.ftype == fs::file_type::not_found)
+			st.files.back().status = diff_status::rightonly;
+		else if(right.ftype == fs::file_type::not_found)
+			st.files.back().status = diff_status::leftonly;
+		else
+			asio::post(st.pool, [&st, file=&st.files.back()] () {
+				file->status = diff_file(file->left, file->right);
+				st.screen.Post(ftxui::Event::Custom);
+			});
 	}
-	trace("--------------------");
 	for(size_t i = 0; i < st.files.size(); ++i)
 		st.indexes.push_back(std::to_string(i));
+	// st.pool.join();
 }
 
 ftxui::Element row_of(
@@ -155,7 +116,7 @@ ftxui::Element row_of(
 
 ftxui::ButtonOption button_simple() {
 	ftxui::ButtonOption option;
-	option.transform = [](const ftxui::EntryState& s) {
+	option.transform = [] (const ftxui::EntryState& s) {
 		auto element = ftxui::text(s.label);
 		if(s.focused) element |= ftxui::inverted;
 		return element;
@@ -165,14 +126,14 @@ ftxui::ButtonOption button_simple() {
 
 void action_enter(app_state& st) {
 	auto file = st.files[st.index];
-	if(file.left.first == fs::file_type::directory
-		&& file.right.first == fs::file_type::directory
+	if(file.left.ftype == fs::file_type::directory
+		&& file.right.ftype == fs::file_type::directory
 	) {
 		st.cwd = st.cwd / file.name;
-		change_directory(st);
+		refresh_directory(st);
 		return;
 	}
-	st.screen.WithRestoredIO([&]() {
+	st.screen.WithRestoredIO([&] () {
 		std::string call = st.opts.editor
 			+ " " + shell_quote(st.opts.left / st.cwd / file.name)
 			+ " " + shell_quote(st.opts.right / st.cwd / file.name);
@@ -183,34 +144,58 @@ void action_enter(app_state& st) {
 
 void action_leave(app_state& st) {
 	st.cwd = st.cwd.parent_path();
-	change_directory(st);
+	refresh_directory(st);
 }
 
 std::function<void(app_state&)> action_refresh(bool reset) {
-	return [reset](app_state& st) {
-		change_directory(st);
+	return [reset] (app_state& st) {
+		refresh_directory(st);
 	};
 }
 
 std::function<void(app_state&)> action_copy(app_side side) {
-	return [side](app_state& st) {
+	return [side] (app_state& st) {
+		if(st.index >= st.files.size()) return;
 		trace(now, "event: copy", side == app_side::left ? "left" : "right");
+		fs::path source = st.opts.left / st.cwd / st.files[st.index].name;
+		fs::path target = st.opts.right / st.cwd / st.files[st.index].name;
+		if(side == app_side::left) std::swap(source, target);
+		if(!fs::exists(source)) return;
+		st.modal.confirm_message = "Copy\n " + std::string(source)
+			+ "\nto\n " + std::string(target);
+		st.modal.confirm_continuation = [=] (app_state& st) {
+			fs::copy(source, target,
+				fs::copy_options::recursive |
+				fs::copy_options::overwrite_existing );
+			refresh_directory(st);
+		};
+		st.modal.confirm = true;
 	};
 }
 
 std::function<void(app_state&)> action_delete(app_side side) {
-	return [side](app_state& st) {
+	return [side] (app_state& st) {
+		if(st.index >= st.files.size()) return;
 		trace(now, "event: delete", side == app_side::left ? "left" : "right");
+		fs::path target = (side == app_side::left ? st.opts.left : st.opts.right)
+			/ st.cwd / st.files[st.index].name;
+		if(!fs::exists(target)) return;
+		st.modal.confirm_message = "Delete\n " + std::string(target);
+		st.modal.confirm_continuation = [=] (app_state& st) {
+			fs::remove_all(target);
+			refresh_directory(st);
+		};
+		st.modal.confirm = true;
 	};
 }
 
 std::function<void(app_state&)> action_shell(app_side side) {
-	return [side](app_state& st) {
+	return [side] (app_state& st) {
 		const char* shell = std::getenv("SHELL");
 		if(shell == NULL) shell = "sh";
 		std::string cwd = (side == app_side::left
 			? st.opts.left : st.opts.right) / st.cwd;
-		st.screen.WithRestoredIO([&]() {
+		st.screen.WithRestoredIO([&] () {
 			proc::system(proc::search_path(shell),
 				proc::std_out > stdout, proc::std_err > stderr, proc::std_in < stdin,
 				proc::env["DDIFF_LEFT"] = fs::absolute(st.opts.left / st.cwd),
@@ -229,16 +214,16 @@ struct button_def {
 
 std::vector<std::pair<std::string, button_def>> button_defs =
 	{ { "?", { "?", "close", "close this window",
-		[](app_state& st) { st.modal.help ^= true; } } }
+		[] (app_state& st) { st.modal.help ^= true; } } }
 	, { "q", { "q", "quit", "quit the app",
-		[](app_state& st) { st.screen.Exit(); } } }
+		[] (app_state& st) { st.screen.Exit(); } } }
 	, { "\x1b[C", { "▶", "enter", "enter directory / open files in editor",
 		action_enter } }
 	, { "\x1b[D", { "◀", "leave", "leave the current directory",
 		action_leave } }
 	, { "r", { "r", "refresh", "refresh files and diffs",
 		action_refresh(false) } }
-	, { "R", { "W", "reset", "reset diff cache",
+	, { "R", { "R", "reset", "reset diff cache",
 		action_refresh(true) } }
 	, { "s", { "s", "shell L", "open shell in the left directory",
 		action_shell(app_side::left) } }
@@ -261,34 +246,22 @@ ftxui::ComponentDecorator with_buttons(
 	app_state* st,
 	const std::set<std::string>& buttons
 ) {
-	return ftxui::CatchEvent([=](const ftxui::Event& event) {
+	return ftxui::CatchEvent([=] (const ftxui::Event& event) {
 		if(event.is_mouse()) return false;
-		if(!buttons.contains(event.input())) return false;
+		auto button = buttons.find(event.input());
+		if(button == buttons.end()) return false;
 		button_map.at(event.input()).func(*st);
 		return true;
 	});
 }
 
-int main(int argc, const char* argv[]) {
-	trace("------------------------------------------------------------");
-	trace(now, "pid", getpid());
+ftxui::Color operator""_rgb216(unsigned long long rgb) {
+	return ftxui::Color::Palette256(16
+		+ 36*(rgb/100%10) + 6*(rgb/10%10) + rgb%10);
+}
 
-	auto opts = get_opts(argc, argv);
-	if(std::holds_alternative<int>(opts))
-		return std::get<int>(opts);
-
-	app_state st =
-		{ .opts = std::move(std::get<app_options>(opts))
-		, .screen = ftxui::ScreenInteractive::Fullscreen()
-		, .cwd = fs::path()
-		, .files = {}
-		, .indexes = {}
-		, .index = 0
-		, .modal = { false, }
-		};
-
-	auto menuopt = ftxui::MenuOption::Vertical();
-	menuopt.entries_option.transform = [&](ftxui::EntryState entry) {
+decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
+	return [&] (const ftxui::EntryState& entry) {
 		auto file = st.files[std::stoi(entry.label)];
 		std::string left_marker, right_marker;
 		ftxui::Color left_color, right_color;
@@ -296,43 +269,46 @@ int main(int argc, const char* argv[]) {
 			case diff_status::unknown:
 				left_marker  = "?";
 				right_marker = "?";
-				left_color   = ftxui::Color::Palette16(4);
-				right_color  = ftxui::Color::Palette16(4);
+				left_color   = 12_rgb216;
+				right_color  = 12_rgb216;
 				break;
 			case diff_status::matching:
 				left_marker  = " ";
 				right_marker = " ";
-				left_color   = ftxui::Color::Palette16(0);
-				right_color  = ftxui::Color::Palette16(0);
+				left_color   = 0_rgb216;
+				right_color  = 0_rgb216;
 				break;
 			case diff_status::different:
 				left_marker  = "*";
 				right_marker = "*";
-				left_color   = ftxui::Color::Palette16(3);
-				right_color  = ftxui::Color::Palette16(3);
+				left_color   = 210_rgb216;
+				right_color  = 210_rgb216;
 				break;
 			case diff_status::leftonly:
 				left_marker  = "+";
 				right_marker = "-";
-				left_color   = ftxui::Color::Palette16(2);
-				right_color  = ftxui::Color::Palette16(1);
+				left_color   =  30_rgb216;
+				right_color  = 300_rgb216;
 				break;
 			case diff_status::rightonly:
 				left_marker  = "-";
 				right_marker = "+";
-				left_color   = ftxui::Color::Palette16(1);
-				right_color  = ftxui::Color::Palette16(2);
+				left_color   = 300_rgb216;
+				right_color  =  30_rgb216;
 				break;
 		}
 		std::string cursor = entry.active ? "▶" : entry.focused ? "▸" : " ";
 		ftxui::Decorator left_style = ftxui::nothing, right_style = ftxui::nothing;
-		if(st.opts.ext_styles.contains(fs::path(file.name).extension()))
-			left_style = right_style = st.opts.ext_styles.at(fs::path(file.name).extension());
+		auto ext_style = st.opts.ext_styles.find(fs::path(file.name).extension());
+		if(ext_style != st.opts.ext_styles.end())
+			left_style = right_style = ext_style->second;
 		else {
-			if(st.opts.ft_styles.contains(file.left))
-				left_style = st.opts.ft_styles.at(file.left);
-			if(st.opts.ft_styles.contains(file.right))
-				right_style = st.opts.ft_styles.at(file.right);
+			auto left = st.opts.ft_styles.find(file.left.file_type());
+			if(left != st.opts.ft_styles.end())
+				left_style = left->second;
+			auto right = st.opts.ft_styles.find(file.right.file_type());
+			if(right != st.opts.ft_styles.end())
+				right_style = right->second;
 		}
 		auto elem = row_of
 			( ftxui::hbox(
@@ -350,18 +326,47 @@ int main(int argc, const char* argv[]) {
 			, st.screen.dimx() );
 		return elem;
 	};
-	menuopt.on_change = [&]() { trace(now, "on_change"); };
-	menuopt.on_enter = [&]() { action_enter(st); };
+}
+
+int main(int argc, const char* argv[]) {
+	trace("------------------------------------------------------------");
+	trace(now, "pid", getpid());
+
+	auto opts_alt = get_opts(argc, argv);
+	if(std::holds_alternative<int>(opts_alt))
+		return std::get<int>(opts_alt);
+	auto opts = std::get<app_options>(opts_alt);
+
+	app_state st =
+		{ .opts = opts
+		, .screen = ftxui::ScreenInteractive::Fullscreen()
+		, .cwd = fs::path()
+		, .files = {}
+		, .indexes = {}
+		, .index = 0
+		, .modal =
+			{ .help = false
+			, .confirm = false
+			, .confirm_message = ""
+			, .confirm_continuation = [](app_state&){}
+			}
+		, .pool = asio::thread_pool(std::max(1u, opts.threads))
+		};
+
+	auto menuopt = ftxui::MenuOption::Vertical();
+	menuopt.entries_option.transform = render_entry(st);
+	// menuopt.on_change = [&] () { trace(now, "on_change"); };
+	menuopt.on_enter = [&] () { action_enter(st); };
 	auto menu_component = ftxui::Menu(&st.indexes, &st.index, menuopt);
 
-	change_directory(st);
+	refresh_directory(st);
 
 	ftxui::Components buttons =
-		{ ftxui::Button("q Quit", [&]() { button_map["q"].func(st); }, button_simple())
-		, ftxui::Button("? Help", [&]() { button_map["?"].func(st); }, button_simple())
+		{ ftxui::Button("q Quit", [&] () { button_map["q"].func(st); }, button_simple())
+		, ftxui::Button("? Help", [&] () { button_map["?"].func(st); }, button_simple())
 		};
 	auto footer_component = ftxui::Renderer(
-		ftxui::Container::Horizontal(buttons), [&]() {
+		ftxui::Container::Horizontal(buttons), [&] () {
 			ftxui::Elements elems = { buttons[0]->Render() };
 			for(size_t i = 1; i < buttons.size(); ++i) {
 				elems.push_back(ftxui::text(" "));
@@ -371,7 +376,7 @@ int main(int argc, const char* argv[]) {
 		}
 	);
 
-	std::thread([&]() {
+	std::thread([&] () {
 		int n = 0;
 		for(; n < 5; ++n) {
 			trace(now, "timer", n);
@@ -388,9 +393,9 @@ int main(int argc, const char* argv[]) {
 
 	auto main_layout = ftxui::Renderer(
 		ftxui::Container::Vertical(
-			{ menu_component | with_buttons(&st, { "\x1b[C", "\x1b[D", })
+			{ menu_component | with_buttons(&st, { "\x1b[C", "\x1b[D" })
 			, footer_component }),
-		[&]() { return ftxui::vbox(
+		[&] () { return ftxui::vbox(
 			{ row_of
 				( ftxui::hbox(
 					{ ftxui::text(st.opts.left) | ftxui::bold
@@ -408,13 +413,13 @@ int main(int argc, const char* argv[]) {
 		});
 
 	ftxui::Components help_buttons;
-	auto mkfunc = [&](std::function<void(app_state&)> func)
-		{ return [func, &st]() { func(st); }; };
+	auto mkfunc = [&] (std::function<void(app_state&)> func)
+		{ return [func, &st] () { func(st); }; };
 	auto button_name_width = std::accumulate(
 		button_defs.begin(), button_defs.end(), 0,
-		[&](size_t x, auto y) { return std::max(x, y.second.name.size()); });
+		[&] (size_t x, auto y) { return std::max(x, y.second.name.size()); });
 	std::transform(button_defs.begin(), button_defs.end(),
-		std::back_inserter(help_buttons), [&](auto& button) {
+		std::back_inserter(help_buttons), [&] (auto& button) {
 			std::ostringstream name;
 			name << button.second.key << ' ' << std::setw(button_name_width)
 				<< button.second.name << "  " << button.second.desc;
@@ -426,12 +431,46 @@ int main(int argc, const char* argv[]) {
 		ftxui::Container::Vertical(help_buttons) | ftxui::border,
 		&st.modal.help);
 
-	st.screen.Loop(main_layout | help_modal
+	ftxui::Component confirm_component;
+	ftxui::Components confirm_buttons =
+		{ ftxui::Button("Cancel", [&] () {
+			st.modal.confirm = false;
+			st.modal.confirm_continuation = [](app_state&){};
+			}, button_simple())
+		, ftxui::Button("Confirm", [&] () {
+			st.modal.confirm = false;
+			st.modal.confirm_continuation(st);
+			st.modal.confirm_continuation = [](app_state&){};
+			confirm_component->SetActiveChild(confirm_buttons[0]);
+			}, button_simple())
+		};
+	confirm_component = ftxui::Container::Horizontal(confirm_buttons);
+
+	auto confirm_modal = ftxui::Modal(ftxui::Renderer(
+		confirm_component, [&] () {
+			std::vector<std::string> lines;
+			boost::split(lines, st.modal.confirm_message, boost::is_any_of("\n"));
+			ftxui::Elements texts;
+			for(auto line : lines)
+				texts.push_back(ftxui::text(line));
+			return ftxui::vbox(
+				{ ftxui::vbox(texts)
+				, ftxui::hbox(
+					{ confirm_buttons[0]->Render()
+					, ftxui::text(" ")
+					, confirm_buttons[1]->Render()
+					})
+				}) | ftxui::border;
+		}), &st.modal.confirm);
+
+	st.screen.Loop(main_layout | help_modal | confirm_modal
 		| with_buttons(&st, { "?", "q", "r", "R", "s", "S", "c", "C", "d", "D" })
-		// | ftxui::CatchEvent([&](ftxui::Event event) {
+		// | ftxui::CatchEvent([&] (ftxui::Event event) {
 			// trace(now, event, json::serialize(event.input()));
 			// return false;
 			// })
 		);
+
+	return 0;
 }
 

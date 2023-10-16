@@ -42,11 +42,13 @@ decltype(auto) identity(T&& t) {
 
 template<typename ...Xs>
 decltype(auto) trace(Xs&& ...xs) {
+#ifndef NDEBUG
 	auto fifo = std::filesystem::path("ddiff.log");
 	if(std::filesystem::exists(fifo)) {
 		std::ofstream file(fifo);
 		tracef(file, xs...);
 	}
+#endif
 	return (identity(std::forward<Xs>(xs)), ...);
 }
 

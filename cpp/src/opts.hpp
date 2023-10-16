@@ -1,6 +1,6 @@
 #pragma once
 
-#include "filetype.hpp"
+#include "fileio.hpp"
 
 #include <filesystem>
 #include <string>
@@ -16,9 +16,10 @@ struct app_options {
 	std::filesystem::path left;
 	std::filesystem::path right;
 	std::string editor;
-	std::vector<std::regex> excludes;
-	std::map<file_type, ftxui::Decorator> ft_styles;
-	std::map<std::string, ftxui::Decorator> ext_styles;
+	unsigned threads = 4;
+	std::vector<std::regex> excludes = {};
+	std::map<file_type, ftxui::Decorator> ft_styles = {};
+	std::map<std::string, ftxui::Decorator> ext_styles = {};
 };
 
 ftxui::Decorator parse_ls_color(const std::string& lscolor);

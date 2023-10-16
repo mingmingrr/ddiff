@@ -12,7 +12,7 @@ natural_key_type natural_key(const std::string& str) {
 			keys.push_back(" ");
 		} else if(std::isdigit(*mid)) {
 			while(mid != right && std::isdigit(*mid)) ++mid;
-			keys.push_back(std::stoll(std::string(left, mid)));
+			keys.push_back(boost::multiprecision::cpp_int(std::string(left, mid)));
 		} else {
 			while(mid != right && !std::isspace(*mid) && !std::isdigit(*mid)) ++mid;
 			keys.push_back(std::string(left, mid));

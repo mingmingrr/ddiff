@@ -1,10 +1,15 @@
-#include "filetype.hpp"
+#include "fileio.hpp"
+#include "memoize.hpp"
 
 #include <fstream>
 #include <sys/stat.h>
 #include <boost/functional/hash.hpp>
 
 namespace fs = std::filesystem;
+
+std::pair<std::filesystem::file_type, file_extra> file_info::file_type() {
+	return { this->ftype, this->extra };
+}
 
 std::ostream& operator <<(std::ostream& output, const fs::file_type& type) {
 	switch(type) {
@@ -37,7 +42,7 @@ std::ostream& operator <<(std::ostream& output, const enum file_extra& type) {
 	return output;
 }
 
-std::map<std::string, file_type> file_type_names =
+const std::map<std::string, file_type> file_type_names =
 	{ { "fi", { fs::file_type::regular   , file_extra::normal       } }
 	, { "su", { fs::file_type::regular   , file_extra::setuid       } }
 	, { "sg", { fs::file_type::regular   , file_extra::setgid       } }
@@ -103,75 +108,106 @@ file_type file_type_of(const fs::path& path) {
 	return {type, extra};
 }
 
-file_info get_file_info(const fs::path& path) {
-	struct stat fstat;
-	if(lstat(path.c_str(), &fstat))
-		throw std::system_error();
-	file_info info =
-		{ .fpath = path
-		, .mtime = fstat.st_mtim
-		, .extra = file_extra::normal
-		, .fsize = fstat.st_size
-		, .hash_init = [=]() {
-			std::ifstream file(path, std::ios::in | std::ios::binary);
-			char buffer[4096];
-			file.read(buffer, 4096);
-			return boost::hash_range(buffer, buffer + file.gcount());
-			}
-		, .hash_whole = [=]() {
-			std::ifstream file(path, std::ios::in | std::ios::binary);
-			char buffer[4096];
-			size_t hash = 0;
-			while(!file.eof()) {
-				file.read(buffer, 4096);
-				boost::hash_combine(hash,
-					boost::hash_range(buffer, buffer + file.gcount()));
-			}
-			return hash;
-			}
-		};
-	switch(fstat.st_mode & S_IFMT) {
-		case S_IFREG: {
-			info.ftype = fs::file_type::regular;
-			if(fstat.st_mode & S_ISUID)
-				info.extra = file_extra::setuid;
-			else if(fstat.st_mode & S_ISGID)
-				info.extra = file_extra::setgid;
-			else if(fstat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
-				info.extra = file_extra::executable;
-			else if(fstat.st_nlink > 1)
-				info.extra = file_extra::multi_link;
-		} break;
-		case S_IFDIR: {
-			info.ftype = fs::file_type::directory;
-			if((fstat.st_mode & (S_ISVTX | S_IWOTH)) == (S_ISVTX | S_IWOTH))
-				info.extra = file_extra::sticky_write;
-			else if(fstat.st_mode & S_ISVTX)
-				info.extra = file_extra::sticky;
-			else if(fstat.st_mode & S_IWOTH)
-				info.extra = file_extra::write;
-		} break;
-		case S_IFLNK:
-			info.ftype = fs::file_type::symlink;
-			if(!fs::exists(resolve_symlink(path)))
-				info.extra = file_extra::orphan;
-			break;
-		case S_IFBLK:
-			info.ftype = fs::file_type::block;
-			break;
-		case S_IFCHR:
-			info.ftype = fs::file_type::character;
-			break;
-		case S_IFIFO:
-			info.ftype = fs::file_type::fifo;
-			break;
-		case S_IFSOCK:
-			info.ftype = fs::file_type::socket;
-			break;
-		default:
-			info.ftype = fs::file_type::unknown;
-			break;
-	}
-	return info;
+bool operator ==(const struct timespec& x, const struct timespec& y) {
+	return (x.tv_sec == y.tv_sec) && (x.tv_nsec == y.tv_nsec);
 }
+
+memoized<
+	file_info,
+	std::optional<struct stat>,
+	const fs::path&
+> get_file_info {
+	.init = [] (const fs::path& path) -> std::optional<struct stat> {
+		struct stat fstat;
+		if(lstat(path.c_str(), &fstat)) {
+			if(errno == ENOENT)
+				return std::nullopt;
+			throw std::system_error(errno, std::generic_category());
+		}
+		return fstat;
+	},
+	.valid = [] (file_info& info, std::optional<struct stat>& fstat, const fs::path& path) {
+		if(!fstat.has_value())
+			return info.mtime == (struct timespec){ 0, 0 };
+		return info.mtime == fstat->st_mtim;
+	},
+	.func = [] (std::optional<struct stat>& fstat, const fs::path& path) {
+		if(!fstat.has_value())
+			return file_info
+				{ .fpath = path
+				, .mtime = { 0, 0 }
+				, .ftype = fs::file_type::not_found
+				, .extra = file_extra::normal
+				, .fsize = 0
+				, .hash_init = size_t(0)
+				, .hash_whole = size_t(0)
+				};
+		file_info info =
+			{ .fpath = path
+			, .mtime = fstat->st_mtim
+			, .extra = file_extra::normal
+			, .fsize = fstat->st_size
+			, .hash_init = [=] () {
+				std::ifstream file(path, std::ios::in | std::ios::binary);
+				char buffer[4096];
+				file.read(buffer, 4096);
+				return boost::hash_range(buffer, buffer + file.gcount());
+				}
+			, .hash_whole = [=] () {
+				std::ifstream file(path, std::ios::in | std::ios::binary);
+				char buffer[4096];
+				size_t hash = 0;
+				while(!file.eof()) {
+					file.read(buffer, 4096);
+					boost::hash_combine(hash,
+						boost::hash_range(buffer, buffer + file.gcount()));
+				}
+				return hash;
+				}
+			};
+		switch(fstat->st_mode & S_IFMT) {
+			case S_IFREG: {
+				info.ftype = fs::file_type::regular;
+				if(fstat->st_mode & S_ISUID)
+					info.extra = file_extra::setuid;
+				else if(fstat->st_mode & S_ISGID)
+					info.extra = file_extra::setgid;
+				else if(fstat->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+					info.extra = file_extra::executable;
+				else if(fstat->st_nlink > 1)
+					info.extra = file_extra::multi_link;
+			} break;
+			case S_IFDIR: {
+				info.ftype = fs::file_type::directory;
+				if((fstat->st_mode & S_ISVTX) && (fstat->st_mode & S_IWOTH))
+					info.extra = file_extra::sticky_write;
+				else if(fstat->st_mode & S_ISVTX)
+					info.extra = file_extra::sticky;
+				else if(fstat->st_mode & S_IWOTH)
+					info.extra = file_extra::write;
+			} break;
+			case S_IFLNK:
+				info.ftype = fs::file_type::symlink;
+				if(!fs::exists(resolve_symlink(path)))
+					info.extra = file_extra::orphan;
+				break;
+			case S_IFBLK:
+				info.ftype = fs::file_type::block;
+				break;
+			case S_IFCHR:
+				info.ftype = fs::file_type::character;
+				break;
+			case S_IFIFO:
+				info.ftype = fs::file_type::fifo;
+				break;
+			case S_IFSOCK:
+				info.ftype = fs::file_type::socket;
+				break;
+			default:
+				info.ftype = fs::file_type::unknown;
+				break;
+		}
+		return info;
+	}
+};
 
