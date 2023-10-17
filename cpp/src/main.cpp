@@ -1,6 +1,5 @@
 #include "lazy.hpp"
 #include "fileio.hpp"
-#include "trace.hpp"
 #include "natkey.hpp"
 #include "opts.hpp"
 #include "memoize.hpp"
@@ -81,9 +80,9 @@ struct app_state {
 void refresh_directory(app_state& st) {
 	auto index = st.indexmap.find(st.cwd);
 	if(index == st.indexmap.end())
-		st.indexmap[st.cwd] = st.index = trace("not found", 0);
+		st.indexmap[st.cwd] = st.index = 0;
 	else
-		st.index = trace("found", index->second);
+		st.index = index->second;
 	st.indexes.clear();
 	st.files.clear();
 	std::vector<natural_key_type> names;
@@ -172,7 +171,6 @@ std::function<void(app_state&)> action_refresh(bool reset) {
 std::function<void(app_state&)> action_copy(app_side side) {
 	return [side] (app_state& st) {
 		if(st.index >= st.files.size()) return;
-		trace(now, "event: copy", side == app_side::left ? "left" : "right");
 		fs::path source = st.opts.left / st.cwd / st.files[st.index].name;
 		fs::path target = st.opts.right / st.cwd / st.files[st.index].name;
 		if(side == app_side::left) std::swap(source, target);
@@ -192,7 +190,6 @@ std::function<void(app_state&)> action_copy(app_side side) {
 std::function<void(app_state&)> action_delete(app_side side) {
 	return [side] (app_state& st) {
 		if(st.index >= st.files.size()) return;
-		trace(now, "event: delete", side == app_side::left ? "left" : "right");
 		fs::path target = (side == app_side::left ? st.opts.left : st.opts.right)
 			/ st.cwd / st.files[st.index].name;
 		if(!fs::exists(target)) return;
@@ -345,9 +342,6 @@ decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
 }
 	
 int main(int argc, const char* argv[]) {
-	trace("------------------------------------------------------------");
-	trace(now, "pid", getpid());
-
 	auto opts_alt = get_opts(argc, argv);
 	if(std::holds_alternative<int>(opts_alt))
 		return std::get<int>(opts_alt);
@@ -372,7 +366,7 @@ int main(int argc, const char* argv[]) {
 
 	auto menuopt = ftxui::MenuOption::Vertical();
 	menuopt.entries_option.transform = render_entry(st);
-	menuopt.on_change = [&] () { st.indexmap[st.cwd] = trace("on_change", st.cwd, st.index); };
+	menuopt.on_change = [&] () { st.indexmap[st.cwd] = st.index; };
 	menuopt.on_enter = [&] () { action_enter(st); };
 	auto menu_component = ftxui::Menu(&st.indexes, &st.index, menuopt);
 
