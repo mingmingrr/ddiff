@@ -18,41 +18,41 @@ if(NOT ftxui_POPULATED)
   add_subdirectory(${ftxui_SOURCE_DIR} ${ftxui_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 
-set(BOOST_SUBMODULES
-  "libs/align;libs/any;libs/array;libs/assert;libs/atomic;libs/bind;"
-  "libs/concept_check;libs/config;libs/container;libs/container_hash;"
-  "libs/context;libs/conversion;libs/core;libs/coroutine;libs/describe;"
-  "libs/detail;libs/exception;libs/filesystem;libs/function;"
-  "libs/function_types;libs/functional;libs/fusion;libs/integer;"
-  "libs/intrusive;libs/io;libs/iterator;libs/json;libs/lexical_cast;"
-  "libs/move;libs/mp11;libs/mpl;libs/numeric;libs/optional;"
-  "libs/pool;libs/predef;libs/preprocessor;libs/program_options;"
-  "libs/range;libs/regex;libs/smart_ptr;libs/static_assert;libs/system;"
-  "libs/throw_exception;libs/tokenizer;libs/tuple;libs/type_index;"
-  "libs/type_traits;libs/typeof;libs/utility;libs/variant2;libs/winapi;"
-  "tools/cmake"
-)
+# set(BOOST_SUBMODULES
+  # "libs/align;libs/any;libs/array;libs/assert;libs/atomic;libs/bind;"
+  # "libs/concept_check;libs/config;libs/container;libs/container_hash;"
+  # "libs/context;libs/conversion;libs/core;libs/coroutine;libs/describe;"
+  # "libs/detail;libs/exception;libs/filesystem;libs/function;"
+  # "libs/function_types;libs/functional;libs/fusion;libs/integer;"
+  # "libs/intrusive;libs/io;libs/iterator;libs/json;libs/lexical_cast;"
+  # "libs/move;libs/mp11;libs/mpl;libs/numeric;libs/optional;"
+  # "libs/pool;libs/predef;libs/preprocessor;libs/program_options;"
+  # "libs/range;libs/regex;libs/smart_ptr;libs/static_assert;libs/system;"
+  # "libs/throw_exception;libs/tokenizer;libs/tuple;libs/type_index;"
+  # "libs/type_traits;libs/typeof;libs/utility;libs/variant2;libs/winapi;"
+  # "tools/cmake"
+# )
 
-set(BOOST_INCLUDE_LIBRARIES
-  json program_options filesystem system coroutine)
-set(BOOST_ENABLE_CMAKE ON)
-FetchContent_Declare(boost
-  GIT_REPOSITORY https://github.com/boostorg/boost.git
-  GIT_TAG boost-1.81.0
-  GIT_SUBMODULES ${BOOST_SUBMODULES}
-)
-FetchContent_GetProperties(boost)
-if(NOT boost_POPULATED)
-  FetchContent_Populate(boost)
-  add_subdirectory(
-    ${boost_SOURCE_DIR}
-    ${boost_BINARY_DIR}
-    EXCLUDE_FROM_ALL
-  )
-endif()
+# set(BOOST_INCLUDE_LIBRARIES
+  # json program_options filesystem system coroutine)
+# set(BOOST_ENABLE_CMAKE ON)
+# FetchContent_Declare(boost
+  # GIT_REPOSITORY https://github.com/boostorg/boost.git
+  # GIT_TAG boost-1.81.0
+  # GIT_SUBMODULES ${BOOST_SUBMODULES}
+# )
+# FetchContent_GetProperties(boost)
+# if(NOT boost_POPULATED)
+  # FetchContent_Populate(boost)
+  # add_subdirectory(
+    # ${boost_SOURCE_DIR}
+    # ${boost_BINARY_DIR}
+    # EXCLUDE_FROM_ALL
+  # )
+# endif()
 
 find_package(Boost REQUIRED COMPONENTS
-  json program_options filesystem system coroutine)
+  program_options filesystem system coroutine)
 include_directories(${Boost_INCLUDE_DIR})
 link_directories(${Boost_LIBRARY_DIRS})
 
