@@ -18,43 +18,83 @@ if(NOT ftxui_POPULATED)
   add_subdirectory(${ftxui_SOURCE_DIR} ${ftxui_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 
-# set(BOOST_SUBMODULES
-  # "libs/align;libs/any;libs/array;libs/assert;libs/atomic;libs/bind;"
-  # "libs/concept_check;libs/config;libs/container;libs/container_hash;"
-  # "libs/context;libs/conversion;libs/core;libs/coroutine;libs/describe;"
-  # "libs/detail;libs/exception;libs/filesystem;libs/function;"
-  # "libs/function_types;libs/functional;libs/fusion;libs/integer;"
-  # "libs/intrusive;libs/io;libs/iterator;libs/json;libs/lexical_cast;"
-  # "libs/move;libs/mp11;libs/mpl;libs/numeric;libs/optional;"
-  # "libs/pool;libs/predef;libs/preprocessor;libs/program_options;"
-  # "libs/range;libs/regex;libs/smart_ptr;libs/static_assert;libs/system;"
-  # "libs/throw_exception;libs/tokenizer;libs/tuple;libs/type_index;"
-  # "libs/type_traits;libs/typeof;libs/utility;libs/variant2;libs/winapi;"
-  # "tools/cmake"
-# )
+set(BOOST_SUBMODULES
+  "libs/algorithm;"
+  "libs/align;"
+  "libs/any;"
+  "libs/array;"
+  "libs/asio;"
+  "libs/assert;"
+  "libs/atomic;"
+  "libs/bind;"
+  "libs/chrono;"
+  "libs/concept_check;"
+  "libs/config;"
+  "libs/container;"
+  "libs/container_hash;"
+  "libs/context;"
+  "libs/conversion;"
+  "libs/core;"
+  "libs/coroutine;"
+  "libs/date_time;"
+  "libs/describe;"
+  "libs/detail;"
+  "libs/dynamic_bitset;"
+  "libs/exception;"
+  "libs/filesystem;"
+  "libs/function;"
+  "libs/function_types;"
+  "libs/functional;"
+  "libs/fusion;"
+  "libs/integer;"
+  "libs/intrusive;"
+  "libs/io;"
+  "libs/iterator;"
+  "libs/json;"
+  "libs/lexical_cast;"
+  "libs/math;"
+  "libs/move;"
+  "libs/mp11;"
+  "libs/mpl;"
+  "libs/multiprecision;"
+  "libs/numeric;"
+  "libs/optional;"
+  "libs/pool;"
+  "libs/predef;"
+  "libs/preprocessor;"
+  "libs/process;"
+  "libs/program_options;"
+  "libs/random;"
+  "libs/range;"
+  "libs/ratio;"
+  "libs/rational;"
+  "libs/regex;"
+  "libs/smart_ptr;"
+  "libs/static_assert;"
+  "libs/system;"
+  "libs/throw_exception;"
+  "libs/tokenizer;"
+  "libs/tuple;"
+  "libs/type_index;"
+  "libs/type_traits;"
+  "libs/typeof;"
+  "libs/unordered;"
+  "libs/utility;"
+  "libs/variant2;"
+  "libs/winapi;"
+  "tools/cmake"
+)
 
-# set(BOOST_INCLUDE_LIBRARIES
-  # json program_options filesystem system coroutine)
-# set(BOOST_ENABLE_CMAKE ON)
-# FetchContent_Declare(boost
-  # GIT_REPOSITORY https://github.com/boostorg/boost.git
-  # GIT_TAG boost-1.81.0
-  # GIT_SUBMODULES ${BOOST_SUBMODULES}
-# )
-# FetchContent_GetProperties(boost)
-# if(NOT boost_POPULATED)
-  # FetchContent_Populate(boost)
-  # add_subdirectory(
-    # ${boost_SOURCE_DIR}
-    # ${boost_BINARY_DIR}
-    # EXCLUDE_FROM_ALL
-  # )
-# endif()
-
-find_package(Boost REQUIRED COMPONENTS
-  program_options filesystem system coroutine)
-include_directories(${Boost_INCLUDE_DIR})
-link_directories(${Boost_LIBRARY_DIRS})
+set(BOOST_INCLUDE_LIBRARIES
+  algorithm asio container_hash multiprecision process
+  json program_options filesystem system coroutine)
+set(BOOST_ENABLE_CMAKE ON)
+FetchContent_Declare(boost
+  GIT_REPOSITORY https://github.com/boostorg/boost.git
+  GIT_TAG boost-1.81.0
+  GIT_SUBMODULES ${BOOST_SUBMODULES}
+)
+FetchContent_MakeAvailable(boost)
 
 add_executable(ddiff
   src/main.cpp
@@ -70,5 +110,12 @@ target_link_libraries(ddiff
   PRIVATE ftxui::screen
   PRIVATE ftxui::dom
   PRIVATE ftxui::component
-  ${Boost_LIBRARIES}
+  PRIVATE Boost::json
+  PRIVATE Boost::program_options
+  PRIVATE Boost::filesystem
+  PRIVATE Boost::system
+  PRIVATE Boost::process
+  PRIVATE Boost::coroutine
+  PRIVATE Boost::multiprecision
+  PRIVATE Boost::algorithm
 )

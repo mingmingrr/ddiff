@@ -1,8 +1,6 @@
 #include "trace.hpp"
 
-#include <cctype>
-#include <sstream>
-#include <iomanip>
+#include <boost/json.hpp>
 
 struct time now;
 
@@ -22,18 +20,8 @@ void tracef(std::ostream& out) {
 	out << std::endl;
 }
 
-std::string serialize(std::string str) {
-	std::ostringstream out;
-	for(char chr : str)
-		if(std::isprint(chr))
-			out << chr;
-		else
-			out << "\\x" << std::hex << std::setw(2) << (int)chr;
-	return out.str();
-}
-
 std::ostream& operator <<(std::ostream& out, ftxui::Event event) {
-	out << "Event: " << serialize(event.input()) << " -> ";
+	out << "Event: " << boost::json::serialize(event.input()) << " -> ";
 	if (event.is_character()) {
 		out << "Event::Character(\"" << event.character() << "\")";
 	} else if (event.is_mouse()) {

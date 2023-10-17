@@ -19,6 +19,7 @@
 #include <iostream>
 #include <shared_mutex>
 #include <mutex>
+#include <numeric>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/process.hpp>
