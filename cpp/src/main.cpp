@@ -6,9 +6,20 @@
 #include "memoize.hpp"
 #include "diff.hpp"
 
-#include <bits/stdc++.h>
-// #include <unistd.h>
-// #include <sys/stat.h>
+#include <string>
+#include <filesystem>
+#include <chrono>
+#include <regex>
+#include <vector>
+#include <functional>
+#include <algorithm>
+#include <map>
+#include <set>
+#include <cstdlib>
+#include <utility>
+#include <iostream>
+#include <shared_mutex>
+#include <mutex>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/process.hpp>
@@ -57,6 +68,7 @@ struct app_state {
 	std::vector<file_entry> files = {};
 	std::vector<std::string> indexes = {};
 	int index = 0;
+	std::map<fs::path, int> indexmap = {};
 	struct {
 		bool help = false;
 		bool confirm = false;
@@ -67,10 +79,11 @@ struct app_state {
 };
 
 void refresh_directory(app_state& st) {
-	// st.pool.stop();
-	// st.pool.wait();
-	// st.pool.join();
-	st.index = 0;
+	auto index = st.indexmap.find(st.cwd);
+	if(index == st.indexmap.end())
+		st.indexmap[st.cwd] = st.index = trace("not found", 0);
+	else
+		st.index = trace("found", index->second);
 	st.indexes.clear();
 	st.files.clear();
 	std::vector<natural_key_type> names;
@@ -99,7 +112,6 @@ void refresh_directory(app_state& st) {
 	}
 	for(size_t i = 0; i < st.files.size(); ++i)
 		st.indexes.push_back(std::to_string(i));
-	// st.pool.join();
 }
 
 ftxui::Element row_of(
@@ -149,6 +161,10 @@ void action_leave(app_state& st) {
 
 std::function<void(app_state&)> action_refresh(bool reset) {
 	return [reset] (app_state& st) {
+		if(reset) {
+			const std::unique_lock<std::shared_mutex> lock(get_file_info.mutex);
+			get_file_info.cache.clear();
+		}
 		refresh_directory(st);
 	};
 }
@@ -327,7 +343,7 @@ decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
 		return elem;
 	};
 }
-
+	
 int main(int argc, const char* argv[]) {
 	trace("------------------------------------------------------------");
 	trace(now, "pid", getpid());
@@ -344,6 +360,7 @@ int main(int argc, const char* argv[]) {
 		, .files = {}
 		, .indexes = {}
 		, .index = 0
+		, .indexmap = {}
 		, .modal =
 			{ .help = false
 			, .confirm = false
@@ -355,7 +372,7 @@ int main(int argc, const char* argv[]) {
 
 	auto menuopt = ftxui::MenuOption::Vertical();
 	menuopt.entries_option.transform = render_entry(st);
-	// menuopt.on_change = [&] () { trace(now, "on_change"); };
+	menuopt.on_change = [&] () { st.indexmap[st.cwd] = trace("on_change", st.cwd, st.index); };
 	menuopt.on_enter = [&] () { action_enter(st); };
 	auto menu_component = ftxui::Menu(&st.indexes, &st.index, menuopt);
 
@@ -375,21 +392,6 @@ int main(int argc, const char* argv[]) {
 			return ftxui::hbox(elems);
 		}
 	);
-
-	std::thread([&] () {
-		int n = 0;
-		for(; n < 5; ++n) {
-			trace(now, "timer", n);
-			st.screen.Post(ftxui::Event::Custom);
-			std::this_thread::sleep_for(1s);
-		}
-		while(true) {
-			trace(now, "timer", n);
-			st.screen.Post(ftxui::Event::Custom);
-			std::this_thread::sleep_for(30s);
-			n += 30;
-		}
-	}).detach();
 
 	auto main_layout = ftxui::Renderer(
 		ftxui::Container::Vertical(
@@ -465,10 +467,6 @@ int main(int argc, const char* argv[]) {
 
 	st.screen.Loop(main_layout | help_modal | confirm_modal
 		| with_buttons(&st, { "?", "q", "r", "R", "s", "S", "c", "C", "d", "D" })
-		// | ftxui::CatchEvent([&] (ftxui::Event event) {
-			// trace(now, event, json::serialize(event.input()));
-			// return false;
-			// })
 		);
 
 	return 0;

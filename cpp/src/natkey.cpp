@@ -11,6 +11,7 @@ natural_key_type natural_key(const std::string& str) {
 			while(mid != right && std::isspace(*mid)) ++mid;
 			keys.push_back(" ");
 		} else if(std::isdigit(*mid)) {
+			while(left != right && *left == '0') ++left, ++mid;
 			while(mid != right && std::isdigit(*mid)) ++mid;
 			keys.push_back(boost::multiprecision::cpp_int(std::string(left, mid)));
 		} else {
