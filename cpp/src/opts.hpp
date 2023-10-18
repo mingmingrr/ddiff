@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fileio.hpp"
+#include "diff.hpp"
 
 #include <filesystem>
 #include <string>
@@ -20,6 +21,7 @@ struct app_options {
 	std::vector<std::regex> excludes = {};
 	std::map<file_type, ftxui::Decorator> ft_styles = {};
 	std::map<std::string, ftxui::Decorator> ext_styles = {};
+	std::map<diff_status, ftxui::Decorator> diff_styles = {};
 };
 
 ftxui::Decorator parse_ls_color(const std::string& lscolor);

@@ -1,9 +1,12 @@
 #include "opts.hpp"
+#include "fileio.hpp"
+#include "diff.hpp"
 
+#include <vector>
 #include <iostream>
-
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string.hpp>
+#include <ftxui/dom/elements.hpp>
 
 namespace opt = boost::program_options;
 
@@ -119,17 +122,29 @@ std::variant<int,app_options> get_opts(int argc, const char* argv[]) {
 		, .right = args["right"].as<std::string>()
 		, .editor = args["editor"].as<std::string>()
 		, .threads = args["threads"].as<unsigned>()
+		, .ft_styles = { { file_type_names.at("fi"), ftxui::nothing } }
+		, .diff_styles =
+			{ { diff_status::unknown,
+				ftxui::color(ftxui::Color(ftxui::Color::Palette16(14))) }
+			, { diff_status::matching, ftxui::bold
+				| ftxui::color(ftxui::Color(ftxui::Color::Palette16(0))) }
+			, { diff_status::different, ftxui::bold
+				| ftxui::color(ftxui::Color(ftxui::Color::Palette16(11))) }
+			, { diff_status::leftonly, ftxui::bold
+				| ftxui::color(ftxui::Color(ftxui::Color::Palette16(10))) }
+			, { diff_status::rightonly, ftxui::bold
+				| ftxui::color(ftxui::Color(ftxui::Color::Palette16(9))) }
+			}
 		};
 	auto exclude = args.find("exclude");
 	if(exclude != args.end())
 		for(const auto exc : exclude->second.as<std::vector<std::string>>())
 			opts.excludes.push_back(std::regex(exc));
-	opts.ft_styles = {{file_type_names.at("fi"), ftxui::nothing}};
 
 	const char* ls_colors = std::getenv("LS_COLORS");
 	if(ls_colors == NULL) ls_colors =
 		"rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:"
-		"bd=40;33;01:cd=40;33;01:or=40;31;01:mi=02;90:su=37;41:sg=30;43:"
+		"bd=40;33;01:cd=40;33;01:or=40;31;01:mi=30:su=37;41:sg=30;43:"
 		"ca=00:tw=30;42:ow=34;42:st=37;44:ex=01;32:";
 
 	std::vector<std::string> ls_color_bits;
@@ -160,6 +175,20 @@ std::variant<int,app_options> get_opts(int argc, const char* argv[]) {
 		if(type.second != file_extra::normal)
 			opts.ft_styles.emplace(type,
 				opts.ft_styles.at({type.first, file_extra::normal}));
+
+	static std::vector<std::pair<std::string, diff_status>> ext_to_diff =
+		{ { ".ddiff.match", diff_status::matching }
+		, { ".ddiff.added", diff_status::leftonly }
+		, { ".ddiff.removed", diff_status::rightonly }
+		, { ".ddiff.modified", diff_status::different }
+		, { ".ddiff.unknown", diff_status::unknown }
+		};
+	for(auto [ ext, st ] : ext_to_diff) {
+		auto style = opts.ext_styles.find(ext);
+		if(style == opts.ext_styles.end()) continue;
+		opts.diff_styles[st] = style->second;
+		opts.ext_styles.erase(style);
+	}
 
 	return opts;
 }

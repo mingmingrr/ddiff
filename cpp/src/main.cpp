@@ -269,46 +269,31 @@ ftxui::ComponentDecorator with_buttons(
 	});
 }
 
-ftxui::Color operator""_rgb216(unsigned long long rgb) {
-	return ftxui::Color::Palette256(16
-		+ 36*(rgb/100%10) + 6*(rgb/10%10) + rgb%10);
-}
-
 decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
 	return [&] (const ftxui::EntryState& entry) {
 		auto file = st.files[std::stoi(entry.label)];
 		std::string left_marker, right_marker;
-		ftxui::Color left_color, right_color;
+		ftxui::Decorator left_marker_style, right_marker_style;
+		left_marker_style = right_marker_style = st.opts.diff_styles.at(file.status);
 		switch(file.status) {
 			case diff_status::unknown:
-				left_marker  = "?";
-				right_marker = "?";
-				left_color   = 12_rgb216;
-				right_color  = 12_rgb216;
+				left_marker = right_marker = "?";
 				break;
 			case diff_status::matching:
-				left_marker  = " ";
-				right_marker = " ";
-				left_color   = 0_rgb216;
-				right_color  = 0_rgb216;
+				left_marker = right_marker = "=";
 				break;
 			case diff_status::different:
-				left_marker  = "*";
-				right_marker = "*";
-				left_color   = 210_rgb216;
-				right_color  = 210_rgb216;
+				left_marker = right_marker  = "*";
 				break;
 			case diff_status::leftonly:
 				left_marker  = "+";
 				right_marker = "-";
-				left_color   =  30_rgb216;
-				right_color  = 300_rgb216;
+				right_marker_style = st.opts.diff_styles.at(diff_status::rightonly);
 				break;
 			case diff_status::rightonly:
 				left_marker  = "-";
 				right_marker = "+";
-				left_color   = 300_rgb216;
-				right_color  =  30_rgb216;
+				right_marker_style = st.opts.diff_styles.at(diff_status::leftonly);
 				break;
 		}
 		std::string cursor = entry.active ? "▶" : entry.focused ? "▸" : " ";
@@ -326,13 +311,13 @@ decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
 		}
 		auto elem = row_of
 			( ftxui::hbox(
-				{ ftxui::text(left_marker) | ftxui::bgcolor(left_color) | ftxui::bold
+				{ ftxui::text(left_marker) | left_marker_style
 				, ftxui::text(cursor)
 				, ftxui::text(file.name) | left_style
 				, ftxui::filler()
 				})
 			, ftxui::hbox(
-				{ ftxui::text(right_marker) | ftxui::bgcolor(right_color) | ftxui::bold
+				{ ftxui::text(right_marker) | right_marker_style
 				, ftxui::text(cursor)
 				, ftxui::text(file.name) | right_style
 				, ftxui::filler()
