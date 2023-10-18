@@ -25,11 +25,11 @@ diff_status diff_file(file_info& left, file_info& right) {
 	if(right.ftype == fs::file_type::not_found)
 		return diff_status::leftonly;
 	if(left.ftype == fs::file_type::symlink) {
-		auto left1 = get_file_info(resolve_symlink(left.fpath));
+		auto left1 = get_symlink_info(left.fpath);
 		return diff_file(left1, right);
 	}
 	if(right.ftype == fs::file_type::symlink) {
-		auto right1 = get_file_info(resolve_symlink(right.fpath));
+		auto right1 = get_symlink_info(right.fpath);
 		return diff_file(left, right1);
 	}
 	if(left.ftype != right.ftype)

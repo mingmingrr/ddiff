@@ -138,8 +138,8 @@ ftxui::ButtonOption button_simple() {
 
 void action_enter(app_state& st) {
 	auto file = st.files[st.index];
-	if(file.left.ftype == fs::file_type::directory
-		&& file.right.ftype == fs::file_type::directory
+	if(get_symlink_info(file.left.fpath).ftype == fs::file_type::directory
+		&& get_symlink_info(file.right.fpath).ftype == fs::file_type::directory
 	) {
 		st.cwd = st.cwd / file.name;
 		refresh_directory(st);

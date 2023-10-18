@@ -211,3 +211,12 @@ memoized<
 	}
 };
 
+file_info get_symlink_info(fs::path path) {
+	file_info info = get_file_info(path);
+	while(info.ftype == fs::file_type::symlink) {
+		path = resolve_symlink(path);
+		info = get_file_info(path);
+	}
+	return info;
+};
+

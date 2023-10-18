@@ -59,3 +59,5 @@ extern memoized<
 	const std::filesystem::path&
 > get_file_info;
 
+file_info get_symlink_info(std::filesystem::path path);
+
