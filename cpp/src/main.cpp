@@ -62,7 +62,8 @@ enum struct app_side {
 };
 
 struct app_state {
-	const app_options opts;
+	std::shared_mutex mutex;
+	app_options opts;
 	ftxui::ScreenInteractive screen;
 	fs::path cwd = "";
 	std::vector<file_entry> files = {};
@@ -105,8 +106,18 @@ void refresh_directory(app_state& st) {
 		else if(right.ftype == fs::file_type::not_found)
 			st.files.back().status = diff_status::leftonly;
 		else
-			asio::post(st.pool, [&st, file=&st.files.back()] () {
-				file->status = diff_file(file->left, file->right);
+			asio::post(st.pool, [&st,
+				cwd=st.cwd, left=left.fpath, right=right.fpath,
+				index=st.files.size() - 1
+			] () {
+				auto l = get_file_info(left), r = get_file_info(right);
+				auto status = diff_file(l, r);
+				{
+					std::unique_lock lock(st.mutex);
+					if(cwd != st.cwd) return;
+					if(index >= st.files.size()) return;
+					st.files[index].status = status;
+				}
 				st.screen.Post(ftxui::Event::Custom);
 			});
 	}
@@ -137,24 +148,33 @@ ftxui::ButtonOption button_simple() {
 }
 
 void action_enter(app_state& st) {
-	auto file = st.files[st.index];
+	file_entry file; {
+		std::shared_lock lock(st.mutex);
+		file = st.files[st.index];
+	}
 	if(get_symlink_info(file.left.fpath).ftype == fs::file_type::directory
 		&& get_symlink_info(file.right.fpath).ftype == fs::file_type::directory
 	) {
-		st.cwd = st.cwd / file.name;
-		refresh_directory(st);
+		{
+			std::unique_lock lock(st.mutex);
+			st.cwd = st.cwd / file.name;
+			refresh_directory(st);
+		}
 		return;
-	}
-	st.screen.WithRestoredIO([&] () {
+	} else {
+		std::shared_lock lock(st.mutex);
 		std::string call = st.opts.editor
 			+ " " + shell_quote(st.opts.left / st.cwd / file.name)
 			+ " " + shell_quote(st.opts.right / st.cwd / file.name);
-		proc::system(proc::search_path("bash"), "-c", call,
-			proc::std_out > stdout, proc::std_err > stderr, proc::std_in < stdin);
-	})();
+		st.screen.WithRestoredIO([call] () {
+			proc::system(proc::search_path("bash"), "-c", call,
+				proc::std_out > stdout, proc::std_err > stderr, proc::std_in < stdin);
+		})();
+	}
 }
 
 void action_leave(app_state& st) {
+	std::unique_lock lock(st.mutex);
 	st.cwd = st.cwd.parent_path();
 	refresh_directory(st);
 }
@@ -165,12 +185,14 @@ std::function<void(app_state&)> action_refresh(bool reset) {
 			const std::unique_lock<std::shared_mutex> lock(get_file_info.mutex);
 			get_file_info.cache.clear();
 		}
+		std::unique_lock lock(st.mutex);
 		refresh_directory(st);
 	};
 }
 
 std::function<void(app_state&)> action_copy(app_side side) {
 	return [side] (app_state& st) {
+		std::unique_lock lock(st.mutex);
 		if(st.index >= st.files.size()) return;
 		fs::path source = st.opts.left / st.cwd / st.files[st.index].name;
 		fs::path target = st.opts.right / st.cwd / st.files[st.index].name;
@@ -190,6 +212,7 @@ std::function<void(app_state&)> action_copy(app_side side) {
 
 std::function<void(app_state&)> action_delete(app_side side) {
 	return [side] (app_state& st) {
+		std::unique_lock lock(st.mutex);
 		if(st.index >= st.files.size()) return;
 		fs::path target = (side == app_side::left ? st.opts.left : st.opts.right)
 			/ st.cwd / st.files[st.index].name;
@@ -205,6 +228,7 @@ std::function<void(app_state&)> action_delete(app_side side) {
 
 std::function<void(app_state&)> action_shell(app_side side) {
 	return [side] (app_state& st) {
+		std::unique_lock lock(st.mutex);
 		const char* shell = std::getenv("SHELL");
 		if(shell == NULL) shell = "sh";
 		std::string cwd = (side == app_side::left
@@ -228,9 +252,9 @@ struct button_def {
 
 std::vector<std::pair<std::string, button_def>> button_defs =
 	{ { "?", { "?", "close", "close this window",
-		[] (app_state& st) { st.modal.help ^= true; } } }
+		[] (app_state& st) { std::unique_lock lock(st.mutex); st.modal.help ^= true; } } }
 	, { "q", { "q", "quit", "quit the app",
-		[] (app_state& st) { st.screen.Exit(); } } }
+		[] (app_state& st) { std::unique_lock lock(st.mutex); st.screen.Exit(); } } }
 	, { "\x1b[C", { "▶", "enter", "enter directory / open files in editor",
 		action_enter } }
 	, { "\x1b[D", { "◀", "leave", "leave the current directory",
@@ -271,6 +295,7 @@ ftxui::ComponentDecorator with_buttons(
 
 decltype(ftxui::MenuEntryOption::transform) render_entry(app_state& st) {
 	return [&] (const ftxui::EntryState& entry) {
+		std::shared_lock lock(st.mutex);
 		auto file = st.files[std::stoi(entry.label)];
 		std::string left_marker, right_marker;
 		ftxui::Decorator left_marker_style, right_marker_style;
@@ -352,8 +377,11 @@ int main(int argc, const char* argv[]) {
 
 	auto menuopt = ftxui::MenuOption::Vertical();
 	menuopt.entries_option.transform = render_entry(st);
-	menuopt.on_change = [&] () { st.indexmap[st.cwd] = st.index; };
-	menuopt.on_enter = [&] () { action_enter(st); };
+	menuopt.on_change = [&](){
+		std::unique_lock lock(st.mutex);
+		st.indexmap[st.cwd] = st.index;
+	};
+	menuopt.on_enter = [&](){ action_enter(st); };
 	auto menu_component = ftxui::Menu(&st.indexes, &st.index, menuopt);
 
 	refresh_directory(st);
@@ -377,21 +405,23 @@ int main(int argc, const char* argv[]) {
 		ftxui::Container::Vertical(
 			{ menu_component | with_buttons(&st, { "\x1b[C", "\x1b[D" })
 			, footer_component }),
-		[&] () { return ftxui::vbox(
-			{ row_of
-				( ftxui::hbox(
-					{ ftxui::text(st.opts.left) | ftxui::bold
-					, ftxui::text("/" / st.cwd) })
-				, ftxui::hbox(
-					{ ftxui::text(st.opts.right) | ftxui::bold
-					, ftxui::text("/" / st.cwd) })
-				, st.screen.dimx() )
-			, ftxui::separator()
-			, menu_component->Render() | ftxui::yframe
-				| ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, st.screen.dimy() - 4)
-			, ftxui::separator()
-			, footer_component->Render() | ftxui::xframe
-			});
+		[&](){
+			std::shared_lock lock(st.mutex);
+			return ftxui::vbox(
+				{ row_of
+					( ftxui::hbox(
+						{ ftxui::text(st.opts.left) | ftxui::bold
+						, ftxui::text("/" / st.cwd) })
+					, ftxui::hbox(
+						{ ftxui::text(st.opts.right) | ftxui::bold
+						, ftxui::text("/" / st.cwd) })
+					, st.screen.dimx() )
+				, ftxui::separator()
+				, menu_component->Render() | ftxui::yframe
+					| ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, st.screen.dimy() - 4)
+				, ftxui::separator()
+				, footer_component->Render() | ftxui::xframe
+				});
 		});
 
 	ftxui::Components help_buttons;
@@ -416,10 +446,12 @@ int main(int argc, const char* argv[]) {
 	ftxui::Component confirm_component;
 	ftxui::Components confirm_buttons =
 		{ ftxui::Button("Cancel", [&] () {
+			std::unique_lock lock(st.mutex);
 			st.modal.confirm = false;
 			st.modal.confirm_continuation = [](app_state&){};
 			}, button_simple())
 		, ftxui::Button("Confirm", [&] () {
+			std::unique_lock lock(st.mutex);
 			st.modal.confirm = false;
 			st.modal.confirm_continuation(st);
 			st.modal.confirm_continuation = [](app_state&){};
@@ -430,8 +462,12 @@ int main(int argc, const char* argv[]) {
 
 	auto confirm_modal = ftxui::Modal(ftxui::Renderer(
 		confirm_component, [&] () {
-			std::vector<std::string> lines;
-			boost::split(lines, st.modal.confirm_message, boost::is_any_of("\n"));
+			std::vector<std::string> lines; {
+				std::shared_lock lock(st.mutex);
+				boost::split(lines,
+					st.modal.confirm_message,
+					boost::is_any_of("\n"));
+			}
 			ftxui::Elements texts;
 			for(auto line : lines)
 				texts.push_back(ftxui::text(line));
